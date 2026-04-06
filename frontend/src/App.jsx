@@ -9,7 +9,6 @@ const GEO_URL =
 // ── 유틸: EXIF에서 GPS + 시간 추출 ──
 const extractPointsFromFiles = async (files) => {
   const results = [];
-
   for (const file of files) {
     try {
       const exif = await exifr.parse(file, {
@@ -18,7 +17,6 @@ const extractPointsFromFiles = async (files) => {
         exif: true,
         pick: ["latitude", "longitude", "DateTimeOriginal", "CreateDate"],
       });
-
       if (exif?.latitude && exif?.longitude) {
         results.push({
           lat: exif.latitude,
@@ -31,41 +29,27 @@ const extractPointsFromFiles = async (files) => {
       console.warn(`EXIF 파싱 실패: ${file.name}`, err);
     }
   }
-
-  // 촬영 시간순 정렬
   results.sort((a, b) => {
     if (!a.time || !b.time) return 0;
     return new Date(a.time) - new Date(b.time);
   });
-
   return results;
 };
 
 // ── 유틸: 좌표 → 시군구 이름 (카카오 역지오코딩) ──
 const getRegionFromCoords = (lat, lng) => {
   return new Promise((resolve) => {
-    if (!window.kakao?.maps?.services) {
-      resolve(null);
-      return;
-    }
+    if (!window.kakao?.maps?.services) { resolve(null); return; }
     const geocoder = new window.kakao.maps.services.Geocoder();
     geocoder.coord2RegionCode(lng, lat, (result, status) => {
       if (status === window.kakao.maps.services.Status.OK) {
-        const region =
-          result.find((r) => r.region_type === "B") ||
-          result.find((r) => r.region_type === "H");
+        const region = result.find((r) => r.region_type === "B") || result.find((r) => r.region_type === "H");
         if (region) {
           const parts = region.address_name.split(" ");
-          const sigungu = parts.find(
-            (p) => p.endsWith("구") || p.endsWith("시") || p.endsWith("군")
-          );
+          const sigungu = parts.find((p) => p.endsWith("구") || p.endsWith("시") || p.endsWith("군"));
           resolve(sigungu || region.region_2depth_name || null);
-        } else {
-          resolve(null);
-        }
-      } else {
-        resolve(null);
-      }
+        } else { resolve(null); }
+      } else { resolve(null); }
     });
   });
 };
@@ -75,14 +59,8 @@ const waitForKakao = (timeout = 5000) => {
   return new Promise((resolve) => {
     const start = Date.now();
     const check = setInterval(() => {
-      if (window.kakao?.maps?.services) {
-        clearInterval(check);
-        resolve(true);
-      }
-      if (Date.now() - start > timeout) {
-        clearInterval(check);
-        resolve(false);
-      }
+      if (Date.now() - start > timeout) { clearInterval(check); resolve(false); return; }
+      if (window.kakao) { clearInterval(check); window.kakao.maps.load(() => resolve(true)); }
     }, 100);
   });
 };
@@ -99,29 +77,28 @@ const KakaoDetailMap = ({ data, onBack }) => {
 
     const checkKakao = setInterval(() => {
       attempts++;
-
       if (attempts > MAX_ATTEMPTS) {
         clearInterval(checkKakao);
         setErrorMsg("카카오맵을 불러오지 못했어요.\n앱키와 도메인 설정을 확인해주세요.");
         return;
       }
+      if (!window.kakao) return;
 
-      if (window.kakao?.maps && mapContainer.current) {
-        clearInterval(checkKakao);
-
+      clearInterval(checkKakao);
+      window.kakao.maps.load(() => {
+        if (!mapContainer.current) return;
         try {
           const { kakao } = window;
           const center = new kakao.maps.LatLng(data.points[0].lat, data.points[0].lng);
           const map = new kakao.maps.Map(mapContainer.current, { center, level: 4 });
+          map.relayout();
 
-          // 모든 포인트가 보이도록 bounds 맞춤
           if (data.points.length > 1) {
             const bounds = new kakao.maps.LatLngBounds();
             data.points.forEach((p) => bounds.extend(new kakao.maps.LatLng(p.lat, p.lng)));
             map.setBounds(bounds, 60);
           }
 
-          // Polyline 동선
           const linePath = data.points.map((p) => new kakao.maps.LatLng(p.lat, p.lng));
           new kakao.maps.Polyline({
             path: linePath,
@@ -131,24 +108,11 @@ const KakaoDetailMap = ({ data, onBack }) => {
             strokeStyle: "solid",
           }).setMap(map);
 
-          // 번호 마커
           linePath.forEach((pos, idx) => {
             const isFirst = idx === 0;
             const isLast = idx === linePath.length - 1;
             const label = isFirst ? "🚀 출발" : isLast ? "🏁 도착" : `${idx + 1}`;
-            const content = `
-              <div style="
-                background:#FF6B6B;
-                color:white;
-                padding:5px 11px;
-                border-radius:20px;
-                font-size:12px;
-                font-weight:600;
-                border:2px solid rgba(255,255,255,0.9);
-                box-shadow:0 3px 10px rgba(0,0,0,0.35);
-                white-space:nowrap;
-              ">${label}</div>
-            `;
+            const content = `<div style="background:#FF6B6B;color:white;padding:5px 11px;border-radius:20px;font-size:12px;font-weight:600;border:2px solid rgba(255,255,255,0.9);box-shadow:0 3px 10px rgba(0,0,0,0.35);white-space:nowrap;">${label}</div>`;
             new kakao.maps.CustomOverlay({ content, position: pos, yAnchor: 2.6 }).setMap(map);
           });
 
@@ -157,30 +121,26 @@ const KakaoDetailMap = ({ data, onBack }) => {
           console.error("카카오맵 렌더링 오류:", err);
           setErrorMsg("지도를 렌더링하는 중 오류가 발생했어요.");
         }
-      }
+      });
     }, 100);
 
     return () => clearInterval(checkKakao);
   }, [data]);
 
   return (
-    <div className="fixed inset-0 z-[9999] flex flex-col" style={{ backgroundColor: "#0A0A0F" }}>
+    <div style={{ position: "fixed", inset: 0, zIndex: 9999, backgroundColor: "#0A0A0F", display: "flex", flexDirection: "column" }}>
+
       {/* 헤더 */}
-      <div className="px-5 py-4 flex items-center gap-3 shrink-0" style={{ borderBottom: "1px solid rgba(255,255,255,0.08)" }}>
+      <div style={{ padding: "16px 20px", display: "flex", alignItems: "center", gap: 12, borderBottom: "1px solid rgba(255,255,255,0.08)", flexShrink: 0 }}>
         <button
           onClick={onBack}
-          className="w-9 h-9 flex items-center justify-center rounded-xl transition-colors"
-          style={{ backgroundColor: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.1)", color: "white", cursor: "pointer" }}
+          style={{ width: 36, height: 36, display: "flex", alignItems: "center", justifyContent: "center", borderRadius: 12, backgroundColor: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.1)", color: "white", cursor: "pointer", flexShrink: 0 }}
         >
           <ArrowLeft size={18} />
         </button>
-        <div className="flex-1" style={{ minWidth: 0 }}>
-          <p style={{ fontSize: 11, color: "rgba(255,255,255,0.3)", letterSpacing: "0.08em", textTransform: "uppercase", marginBottom: 2 }}>
-            Spot Detail
-          </p>
-          <h3 style={{ fontSize: 15, fontWeight: 500, color: "white", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-            {data.regionName} 동선
-          </h3>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <p style={{ fontSize: 11, color: "rgba(255,255,255,0.3)", letterSpacing: "0.08em", textTransform: "uppercase", marginBottom: 2 }}>Spot Detail</p>
+          <h3 style={{ fontSize: 15, fontWeight: 500, color: "white", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{data.regionName} 동선</h3>
         </div>
         <div style={{ padding: "4px 12px", backgroundColor: "rgba(255,107,107,0.12)", border: "1px solid rgba(255,107,107,0.25)", borderRadius: 20, flexShrink: 0 }}>
           <span style={{ fontSize: 12, color: "#FF6B6B" }}>📍 {data.points.length}곳</span>
@@ -189,8 +149,8 @@ const KakaoDetailMap = ({ data, onBack }) => {
 
       {/* 로딩 */}
       {!isMapReady && !errorMsg && (
-        <div className="absolute inset-0 flex flex-col items-center justify-center z-10" style={{ backgroundColor: "#0A0A0F" }}>
-          <Loader2 className="animate-spin mb-3" size={36} style={{ color: "#FF6B6B" }} />
+        <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", backgroundColor: "#0A0A0F", zIndex: 10 }}>
+          <Loader2 className="animate-spin" size={36} style={{ color: "#FF6B6B", marginBottom: 12 }} />
           <p style={{ fontSize: 13, color: "rgba(255,255,255,0.4)" }}>카카오맵 불러오는 중...</p>
           <p style={{ fontSize: 11, color: "rgba(255,255,255,0.2)", marginTop: 6 }}>처음 로드 시 잠시 걸릴 수 있어요</p>
         </div>
@@ -198,7 +158,7 @@ const KakaoDetailMap = ({ data, onBack }) => {
 
       {/* 오류 */}
       {errorMsg && (
-        <div className="absolute inset-0 flex flex-col items-center justify-center z-10 px-8" style={{ backgroundColor: "#0A0A0F" }}>
+        <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", backgroundColor: "#0A0A0F", zIndex: 10, padding: "0 32px" }}>
           <AlertCircle size={36} style={{ color: "#FF6B6B", marginBottom: 12 }} />
           <p style={{ fontSize: 14, color: "white", textAlign: "center", marginBottom: 8, whiteSpace: "pre-line" }}>{errorMsg}</p>
           <p style={{ fontSize: 12, color: "rgba(255,255,255,0.3)", textAlign: "center", lineHeight: 1.7 }}>
@@ -208,32 +168,19 @@ const KakaoDetailMap = ({ data, onBack }) => {
         </div>
       )}
 
-      {/* 지도 */}
-      <div ref={mapContainer} className="flex-1 w-full" />
+      {/* 지도 영역 — flex:1 + minHeight:0 으로 남은 공간 전체 차지 */}
+      <div
+        ref={mapContainer}
+        style={{ flex: 1, width: "100%", minHeight: 0 }}
+      />
 
-      {/* 하단 포인트 스크롤 목록 */}
+      {/* 하단 포인트 목록 */}
       {isMapReady && data.points.length > 0 && (
-        <div
-          style={{
-            padding: "12px 16px",
-            backgroundColor: "#0D0D16",
-            borderTop: "1px solid rgba(255,255,255,0.07)",
-            display: "flex",
-            gap: 8,
-            overflowX: "auto",
-          }}
-        >
+        <div style={{ padding: "12px 16px", backgroundColor: "#0D0D16", borderTop: "1px solid rgba(255,255,255,0.07)", display: "flex", gap: 8, overflowX: "auto", flexShrink: 0 }}>
           {data.points.map((p, idx) => (
             <div
               key={idx}
-              style={{
-                flexShrink: 0,
-                padding: "8px 12px",
-                backgroundColor: "rgba(255,255,255,0.04)",
-                border: "1px solid rgba(255,255,255,0.07)",
-                borderRadius: 12,
-                minWidth: 90,
-              }}
+              style={{ flexShrink: 0, padding: "8px 12px", backgroundColor: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.07)", borderRadius: 12, minWidth: 90 }}
             >
               <p style={{ fontSize: 10, color: "#FF6B6B", marginBottom: 3 }}>
                 {idx === 0 ? "🚀 출발" : idx === data.points.length - 1 ? "🏁 도착" : `📍 ${idx + 1}`}
@@ -259,7 +206,7 @@ const SpotLog = () => {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const [selectedRegion, setSelectedRegion] = useState(null);
-  const [uploadStep, setUploadStep] = useState(0); // 0:idle 1:analyzing 2:done 3:no-gps
+  const [uploadStep, setUploadStep] = useState(0);
   const [previewFile, setPreviewFile] = useState(null);
   const [pendingPoints, setPendingPoints] = useState([]);
   const [pendingRegion, setPendingRegion] = useState(null);
@@ -279,41 +226,24 @@ const SpotLog = () => {
     },
   ]);
 
-  const getRegionName = (geo) =>
-    geo.properties.name || geo.properties.name_ko || "알 수 없는 지역";
+  const getRegionName = (geo) => geo.properties.name || geo.properties.name_ko || "알 수 없는 지역";
   const visitedNames = visitedLogs.map((l) => l.regionName);
-
   const years = ["전체", ...new Set(visitedLogs.map((l) => l.date.split(".")[0]))].reverse();
-  const filteredLogs =
-    filterYear === "전체"
-      ? visitedLogs
-      : visitedLogs.filter((l) => l.date.startsWith(filterYear));
+  const filteredLogs = filterYear === "전체" ? visitedLogs : visitedLogs.filter((l) => l.date.startsWith(filterYear));
 
-  // ── 파일 업로드 & EXIF 파싱 ──
   const handleFileUpload = async (e) => {
     const files = Array.from(e.target.files);
     if (!files.length) return;
-
     setPreviewFile(URL.createObjectURL(files[0]));
     setUploadStep(1);
-
     try {
       const points = await extractPointsFromFiles(files);
-
-      if (points.length === 0) {
-        setUploadStep(3);
-        return;
-      }
-
-      // 카카오 역지오코딩으로 시군구 자동 감지
+      if (points.length === 0) { setUploadStep(3); return; }
       let regionName = selectedRegion;
       if (!regionName) {
         const kakaoReady = await waitForKakao(3000);
-        if (kakaoReady) {
-          regionName = await getRegionFromCoords(points[0].lat, points[0].lng);
-        }
+        if (kakaoReady) regionName = await getRegionFromCoords(points[0].lat, points[0].lng);
       }
-
       setPendingPoints(points);
       setPendingRegion(regionName || "알 수 없는 지역");
       setUploadStep(2);
@@ -323,12 +253,10 @@ const SpotLog = () => {
     }
   };
 
-  // ── 저장 ──
   const handleSave = () => {
     const regionToSave = pendingRegion || selectedRegion || "알 수 없는 지역";
     const today = new Date();
     const dateStr = `${today.getFullYear()}.${String(today.getMonth() + 1).padStart(2, "0")}.${String(today.getDate()).padStart(2, "0")}`;
-
     const newLog = {
       id: Date.now(),
       regionName: regionToSave,
@@ -337,7 +265,6 @@ const SpotLog = () => {
         ? pendingPoints
         : [{ lat: 37.5665, lng: 126.978 }, { lat: 37.5695, lng: 126.982 }, { lat: 37.5635, lng: 126.985 }],
     };
-
     setVisitedLogs([newLog, ...visitedLogs]);
     closeModal();
   };
