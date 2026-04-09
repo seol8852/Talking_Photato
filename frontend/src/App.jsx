@@ -1,12 +1,12 @@
 import React, { useState, useEffect, useRef } from "react";
-import { Menu, X, Plus, MapPin, Heart, Upload, Loader2, Trash2, ArrowLeft, Check, AlertCircle } from "lucide-react";
+import { Menu, X, Plus, MapPin, Heart, Upload, Loader2, Trash2, ArrowLeft, Check, AlertCircle, LogOut } from "lucide-react";
 import { ComposableMap, Geographies, Geography, ZoomableGroup } from "react-simple-maps";
 import * as exifr from "exifr";
+import { supabase } from "./supabaseClient";
 
 const GEO_URL =
   "https://raw.githubusercontent.com/southkorea/southkorea-maps/master/kostat/2018/json/skorea-municipalities-2018-topo.json";
 
-// ── 행정구역 코드 앞 2자리 → 시/도 접두어 매핑 ──
 const SIDO_PREFIX = {
   "11": "서울", "21": "부산", "22": "대구", "23": "인천",
   "24": "광주", "25": "대전", "26": "울산", "29": "세종",
@@ -16,8 +16,7 @@ const SIDO_PREFIX = {
 
 const DUPLICATE_NAMES = new Set([
   "중구", "남구", "북구", "동구", "서구",
-  "강서구", "강동구", "강남구", "강북구",
-  "수성구", "달서구",
+  "강서구", "강동구", "강남구", "강북구", "수성구", "달서구",
 ]);
 
 const buildKeyFromCode = (name, code) => {
@@ -40,19 +39,16 @@ const buildKeyFromKakao = (depth1, depth2) => {
   return depth2;
 };
 
-// ── 날짜 문자열 포맷 (YYYY.MM.DD) ──
 const formatDate = (date) => {
   const d = new Date(date);
   return `${d.getFullYear()}.${String(d.getMonth() + 1).padStart(2, "0")}.${String(d.getDate()).padStart(2, "0")}`;
 };
 
-// ── 날짜 키 (그룹핑용, YYYY-MM-DD) ──
 const getDateKey = (date) => {
   const d = new Date(date);
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 };
 
-// ── 유틸: EXIF에서 GPS + 촬영 날짜 추출 ──
 const extractPointsFromFiles = async (files) => {
   const results = [];
   for (const file of files) {
@@ -63,8 +59,7 @@ const extractPointsFromFiles = async (files) => {
       });
       if (exif?.latitude && exif?.longitude) {
         results.push({
-          lat: exif.latitude,
-          lng: exif.longitude,
+          lat: exif.latitude, lng: exif.longitude,
           time: exif.DateTimeOriginal || null,
           fileName: file.name,
         });
@@ -73,7 +68,6 @@ const extractPointsFromFiles = async (files) => {
       console.warn(`EXIF 파싱 실패: ${file.name}`, err);
     }
   }
-  // 촬영 시간순 정렬
   results.sort((a, b) => {
     if (!a.time || !b.time) return 0;
     return new Date(a.time) - new Date(b.time);
@@ -81,8 +75,6 @@ const extractPointsFromFiles = async (files) => {
   return results;
 };
 
-// ── 유틸: 포인트 배열 → 날짜별 그룹으로 분리 ──
-// 반환: [{ dateKey, date, points }, ...]
 const groupPointsByDate = (points) => {
   const groups = {};
   for (const point of points) {
@@ -90,7 +82,6 @@ const groupPointsByDate = (points) => {
     if (!groups[key]) groups[key] = { dateKey: key, date: point.time, points: [] };
     groups[key].points.push(point);
   }
-  // 날짜순 정렬
   return Object.values(groups).sort((a, b) => {
     if (a.dateKey === "unknown") return 1;
     if (b.dateKey === "unknown") return -1;
@@ -98,37 +89,29 @@ const groupPointsByDate = (points) => {
   });
 };
 
-// ── 유틸: 좌표 → 고유 지역 키 ──
 const getRegionFromCoords = (lat, lng) => {
   return new Promise((resolve) => {
     if (!window.kakao?.maps?.services) { resolve(null); return; }
     const geocoder = new window.kakao.maps.services.Geocoder();
     geocoder.coord2RegionCode(lng, lat, (result, status) => {
       if (status !== window.kakao.maps.services.Status.OK) { resolve(null); return; }
-      const region =
-        result.find((r) => r.region_type === "B") ||
-        result.find((r) => r.region_type === "H");
+      const region = result.find((r) => r.region_type === "B") || result.find((r) => r.region_type === "H");
       if (!region) { resolve(null); return; }
-      const key = buildKeyFromKakao(region.region_1depth_name, region.region_2depth_name);
-      resolve(key);
+      resolve(buildKeyFromKakao(region.region_1depth_name, region.region_2depth_name));
     });
   });
 };
 
-// ── 유틸: 포인트 배열에서 대표 지역명 추출 (가장 많이 등장한 지역) ──
 const getDominantRegion = async (points) => {
-  const regionCounts = {};
+  const counts = {};
   for (const p of points) {
-    const region = await getRegionFromCoords(p.lat, p.lng);
-    if (region) {
-      regionCounts[region] = (regionCounts[region] || 0) + 1;
-    }
+    const r = await getRegionFromCoords(p.lat, p.lng);
+    if (r) counts[r] = (counts[r] || 0) + 1;
   }
-  if (Object.keys(regionCounts).length === 0) return null;
-  return Object.entries(regionCounts).sort((a, b) => b[1] - a[1])[0][0];
+  if (!Object.keys(counts).length) return null;
+  return Object.entries(counts).sort((a, b) => b[1] - a[1])[0][0];
 };
 
-// ── 카카오 SDK 로드 대기 ──
 const waitForKakao = (timeout = 5000) => {
   return new Promise((resolve) => {
     const start = Date.now();
@@ -149,11 +132,7 @@ const KakaoDetailMap = ({ data, onBack }) => {
     let attempts = 0;
     const checkKakao = setInterval(() => {
       attempts++;
-      if (attempts > 50) {
-        clearInterval(checkKakao);
-        setErrorMsg("카카오맵을 불러오지 못했어요.");
-        return;
-      }
+      if (attempts > 50) { clearInterval(checkKakao); setErrorMsg("카카오맵을 불러오지 못했어요."); return; }
       if (!window.kakao) return;
       clearInterval(checkKakao);
       window.kakao.maps.load(() => {
@@ -169,21 +148,15 @@ const KakaoDetailMap = ({ data, onBack }) => {
             map.setBounds(bounds, 80);
           }
           const linePath = data.points.map((p) => new kakao.maps.LatLng(p.lat, p.lng));
-          new kakao.maps.Polyline({
-            path: linePath, strokeWeight: 5, strokeColor: "#FF6B6B",
-            strokeOpacity: 0.85, strokeStyle: "solid",
-          }).setMap(map);
+          new kakao.maps.Polyline({ path: linePath, strokeWeight: 5, strokeColor: "#FF6B6B", strokeOpacity: 0.85, strokeStyle: "solid" }).setMap(map);
           linePath.forEach((pos, idx) => {
-            const isFirst = idx === 0;
-            const isLast = idx === linePath.length - 1;
+            const isFirst = idx === 0, isLast = idx === linePath.length - 1;
             const label = isFirst ? "🚀 출발" : isLast ? "🏁 도착" : `${idx + 1}`;
             const content = `<div style="background:#FF6B6B;color:white;padding:5px 11px;border-radius:20px;font-size:12px;font-weight:600;border:2px solid rgba(255,255,255,0.9);box-shadow:0 3px 10px rgba(0,0,0,0.35);white-space:nowrap;">${label}</div>`;
             new kakao.maps.CustomOverlay({ content, position: pos, yAnchor: 2.6 }).setMap(map);
           });
           setIsMapReady(true);
-        } catch (err) {
-          setErrorMsg("지도를 렌더링하는 중 오류가 발생했어요.");
-        }
+        } catch (err) { setErrorMsg("지도를 렌더링하는 중 오류가 발생했어요."); }
       });
     }, 100);
     return () => clearInterval(checkKakao);
@@ -220,15 +193,9 @@ const KakaoDetailMap = ({ data, onBack }) => {
         <div style={{ padding: "12px 16px", backgroundColor: "#0D0D16", borderTop: "1px solid rgba(255,255,255,0.07)", display: "flex", gap: 8, overflowX: "auto", flexShrink: 0 }}>
           {data.points.map((p, idx) => (
             <div key={idx} style={{ flexShrink: 0, padding: "8px 12px", backgroundColor: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.07)", borderRadius: 12, minWidth: 90 }}>
-              <p style={{ fontSize: 10, color: "#FF6B6B", marginBottom: 3 }}>
-                {idx === 0 ? "🚀 출발" : idx === data.points.length - 1 ? "🏁 도착" : `📍 ${idx + 1}`}
-              </p>
+              <p style={{ fontSize: 10, color: "#FF6B6B", marginBottom: 3 }}>{idx === 0 ? "🚀 출발" : idx === data.points.length - 1 ? "🏁 도착" : `📍 ${idx + 1}`}</p>
               <p style={{ fontSize: 11, color: "rgba(255,255,255,0.5)" }}>{p.lat.toFixed(4)}, {p.lng.toFixed(4)}</p>
-              {p.time && (
-                <p style={{ fontSize: 10, color: "rgba(255,255,255,0.25)", marginTop: 2 }}>
-                  {new Date(p.time).toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" })}
-                </p>
-              )}
+              {p.time && <p style={{ fontSize: 10, color: "rgba(255,255,255,0.25)", marginTop: 2 }}>{new Date(p.time).toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" })}</p>}
             </div>
           ))}
         </div>
@@ -237,98 +204,109 @@ const KakaoDetailMap = ({ data, onBack }) => {
   );
 };
 
-// ── 날짜별 그룹 미리보기 카드 ──
-const DateGroupCard = ({ group, index, total }) => {
-  return (
-    <div style={{ padding: "12px 14px", backgroundColor: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.07)", borderRadius: 14 }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <div style={{ width: 20, height: 20, borderRadius: "50%", backgroundColor: "#FF6B6B", display: "flex", alignItems: "center", justifyContent: "center" }}>
-            <span style={{ fontSize: 10, color: "white", fontWeight: 600 }}>{index + 1}</span>
-          </div>
-          <span style={{ fontSize: 13, fontWeight: 500, color: "white" }}>
-            {group.date ? formatDate(group.date) : "날짜 미상"}
-          </span>
+// ── 날짜별 그룹 카드 ──
+const DateGroupCard = ({ group, index }) => (
+  <div style={{ padding: "12px 14px", backgroundColor: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.07)", borderRadius: 14 }}>
+    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <div style={{ width: 20, height: 20, borderRadius: "50%", backgroundColor: "#FF6B6B", display: "flex", alignItems: "center", justifyContent: "center" }}>
+          <span style={{ fontSize: 10, color: "white", fontWeight: 600 }}>{index + 1}</span>
         </div>
-        <span style={{ fontSize: 11, color: "rgba(255,255,255,0.3)" }}>📍 {group.points.length}장</span>
+        <span style={{ fontSize: 13, fontWeight: 500, color: "white" }}>{group.date ? formatDate(group.date) : "날짜 미상"}</span>
       </div>
-      {group.regionName && (
-        <p style={{ fontSize: 12, color: "#FF6B6B", marginLeft: 28 }}>대표 지역: {group.regionName}</p>
-      )}
-      {!group.regionName && group.analyzing && (
-        <div style={{ display: "flex", alignItems: "center", gap: 6, marginLeft: 28 }}>
-          <Loader2 size={11} className="animate-spin" style={{ color: "rgba(255,255,255,0.3)" }} />
-          <span style={{ fontSize: 11, color: "rgba(255,255,255,0.3)" }}>지역 분석 중...</span>
-        </div>
-      )}
+      <span style={{ fontSize: 11, color: "rgba(255,255,255,0.3)" }}>📍 {group.points.length}장</span>
     </div>
-  );
-};
+    {group.regionName && <p style={{ fontSize: 12, color: "#FF6B6B", marginLeft: 28 }}>대표 지역: {group.regionName}</p>}
+    {!group.regionName && group.analyzing && (
+      <div style={{ display: "flex", alignItems: "center", gap: 6, marginLeft: 28 }}>
+        <Loader2 size={11} className="animate-spin" style={{ color: "rgba(255,255,255,0.3)" }} />
+        <span style={{ fontSize: 11, color: "rgba(255,255,255,0.3)" }}>지역 분석 중...</span>
+      </div>
+    )}
+  </div>
+);
 
 // ── 메인 앱 ──
-const SpotLog = () => {
+const SpotLog = ({ user, couple, onLogout }) => {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const [selectedRegion, setSelectedRegion] = useState(null);
-  const [uploadStep, setUploadStep] = useState(0); // 0:idle 1:analyzing 2:preview 3:no-gps
+  const [uploadStep, setUploadStep] = useState(0);
   const [previewFile, setPreviewFile] = useState(null);
-  const [pendingGroups, setPendingGroups] = useState([]); // 날짜별 그룹 배열
+  const [pendingGroups, setPendingGroups] = useState([]);
   const [viewDetail, setViewDetail] = useState(null);
   const [filterYear, setFilterYear] = useState("전체");
 
-  const [visitedLogs, setVisitedLogs] = useState([
-    {
-      id: 1,
-      regionName: "강남구",
-      date: "2026.03.30",
-      points: [
-        { lat: 37.5172, lng: 127.0412 },
-        { lat: 37.5212, lng: 127.0392 },
-        { lat: 37.5252, lng: 127.0452 },
-      ],
-    },
-  ]);
+  // ── Supabase에서 불러온 방문 기록 ──
+  const [visitedLogs, setVisitedLogs] = useState([]);
+  const [dbLoading, setDbLoading] = useState(true);
+
+  // ── DB에서 방문 기록 불러오기 ──
+  const fetchVisits = async () => {
+    const { data, error } = await supabase
+      .from("visits")
+      .select("*")
+      .eq("couple_id", couple.id)
+      .order("created_at", { ascending: false });
+
+    if (error) { console.error("방문 기록 불러오기 실패:", error); return; }
+
+    setVisitedLogs(data.map((row) => ({
+      id: row.id,
+      regionName: row.region_name,
+      date: row.date,
+      points: row.points,
+    })));
+    setDbLoading(false);
+  };
+
+  // ── 실시간 구독 (상대방이 추가/삭제하면 자동 반영) ──
+  useEffect(() => {
+    fetchVisits();
+
+    const channel = supabase
+      .channel(`visits-${couple.id}`)
+      .on("postgres_changes", {
+        event: "*",
+        schema: "public",
+        table: "visits",
+        filter: `couple_id=eq.${couple.id}`,
+      }, () => {
+        fetchVisits(); // 변경 감지 시 전체 재조회
+      })
+      .subscribe();
+
+    return () => supabase.removeChannel(channel);
+  }, [couple.id]);
 
   const getGeoKey = (geo) => buildKeyFromCode(geo.properties.name, geo.properties.code);
   const visitedNames = visitedLogs.map((l) => l.regionName);
   const years = ["전체", ...new Set(visitedLogs.map((l) => l.date.split(".")[0]))].reverse();
   const filteredLogs = filterYear === "전체" ? visitedLogs : visitedLogs.filter((l) => l.date.startsWith(filterYear));
 
-  // ── 파일 업로드 & EXIF 파싱 & 날짜별 그룹핑 ──
+  // ── 파일 업로드 & EXIF 파싱 ──
   const handleFileUpload = async (e) => {
     const files = Array.from(e.target.files);
     if (!files.length) return;
     setPreviewFile(URL.createObjectURL(files[0]));
     setUploadStep(1);
-
     try {
       const points = await extractPointsFromFiles(files);
       if (points.length === 0) { setUploadStep(3); return; }
-
-      // 날짜별 그룹핑
       const groups = groupPointsByDate(points);
-
-      // 초기 상태 (analyzing: true)
       const initialGroups = groups.map((g) => ({ ...g, regionName: null, analyzing: true }));
       setPendingGroups(initialGroups);
       setUploadStep(2);
-
-      // 카카오 역지오코딩으로 각 그룹의 대표 지역 비동기 분석
       const kakaoReady = await waitForKakao(3000);
       if (kakaoReady) {
         for (let i = 0; i < groups.length; i++) {
           const region = await getDominantRegion(groups[i].points);
           setPendingGroups((prev) =>
-            prev.map((g, idx) =>
-              idx === i ? { ...g, regionName: region || selectedRegion || "알 수 없는 지역", analyzing: false } : g
-            )
+            prev.map((g, idx) => idx === i ? { ...g, regionName: region || selectedRegion || "알 수 없는 지역", analyzing: false } : g)
           );
         }
       } else {
-        // 카카오 실패 시 선택된 지역으로 fallback
-        setPendingGroups((prev) =>
-          prev.map((g) => ({ ...g, regionName: selectedRegion || "알 수 없는 지역", analyzing: false }))
-        );
+        setPendingGroups((prev) => prev.map((g) => ({ ...g, regionName: selectedRegion || "알 수 없는 지역", analyzing: false })));
       }
     } catch (err) {
       console.error("EXIF 처리 오류:", err);
@@ -336,25 +314,27 @@ const SpotLog = () => {
     }
   };
 
-  // ── 저장: 날짜별 그룹을 각각 별도 기록으로 저장 ──
-  const handleSave = () => {
-    const newLogs = pendingGroups.map((group) => ({
-      id: Date.now() + Math.random(),
-      regionName: group.regionName || selectedRegion || "알 수 없는 지역",
+  // ── Supabase에 저장 ──
+  const handleSave = async () => {
+    const rows = pendingGroups.map((group) => ({
+      couple_id: couple.id,
+      region_name: group.regionName || selectedRegion || "알 수 없는 지역",
       date: group.date ? formatDate(group.date) : formatDate(new Date()),
       points: group.points,
     }));
 
-    setVisitedLogs([...newLogs, ...visitedLogs]);
+    const { error } = await supabase.from("visits").insert(rows);
+    if (error) { console.error("저장 실패:", error); alert("저장에 실패했어요."); return; }
     closeModal();
   };
 
-  const deleteLog = (id, e) => {
+  // ── Supabase에서 삭제 ──
+  const deleteLog = async (id, e) => {
     e.stopPropagation();
-    if (window.confirm("이 구역의 기록을 삭제할까요?")) {
-      setVisitedLogs(visitedLogs.filter((l) => l.id !== id));
-      setSelectedRegion(null);
-    }
+    if (!window.confirm("이 구역의 기록을 삭제할까요?")) return;
+    const { error } = await supabase.from("visits").delete().eq("id", id);
+    if (error) { console.error("삭제 실패:", error); alert("삭제에 실패했어요."); }
+    setSelectedRegion(null);
   };
 
   const closeModal = () => {
@@ -407,35 +387,34 @@ const SpotLog = () => {
 
         {/* 지도 */}
         <div className="flex-1 rounded-3xl overflow-hidden" style={{ backgroundColor: "rgba(255,255,255,0.015)", border: "1px solid rgba(255,255,255,0.04)", minHeight: 280 }}>
-          <ComposableMap projection="geoMercator" projectionConfig={{ scale: 4500, center: [127.9, 36.2] }} style={{ width: "100%", height: "100%" }}>
-            <ZoomableGroup zoom={1}>
-              <Geographies geography={GEO_URL}>
-                {({ geographies }) =>
-                  geographies.map((geo) => {
-                    const key = getGeoKey(geo);
-                    const visited = visitedNames.includes(key);
-                    const selected = selectedRegion === key;
-                    return (
-                      <Geography
-                        key={geo.rsmKey}
-                        geography={geo}
-                        onClick={() => setSelectedRegion(key)}
-                        style={{
-                          default: {
-                            fill: selected ? "#FF6B6B" : visited ? "rgba(255,107,107,0.28)" : "rgba(255,255,255,0.04)",
-                            stroke: selected ? "rgba(255,255,255,0.4)" : visited ? "rgba(255,107,107,0.5)" : "rgba(255,255,255,0.18)",
-                            strokeWidth: 0.5, outline: "none",
-                          },
-                          hover: { fill: visited ? "rgba(255,107,107,0.45)" : "rgba(255,107,107,0.2)", cursor: "pointer", outline: "none" },
-                          pressed: { fill: "#FF6B6B", outline: "none" },
-                        }}
-                      />
-                    );
-                  })
-                }
-              </Geographies>
-            </ZoomableGroup>
-          </ComposableMap>
+          {dbLoading ? (
+            <div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center" }}>
+              <Loader2 className="animate-spin" size={28} style={{ color: "#FF6B6B" }} />
+            </div>
+          ) : (
+            <ComposableMap projection="geoMercator" projectionConfig={{ scale: 4500, center: [127.9, 36.2] }} style={{ width: "100%", height: "100%" }}>
+              <ZoomableGroup zoom={1}>
+                <Geographies geography={GEO_URL}>
+                  {({ geographies }) =>
+                    geographies.map((geo) => {
+                      const key = getGeoKey(geo);
+                      const visited = visitedNames.includes(key);
+                      const selected = selectedRegion === key;
+                      return (
+                        <Geography key={geo.rsmKey} geography={geo} onClick={() => setSelectedRegion(key)}
+                          style={{
+                            default: { fill: selected ? "#FF6B6B" : visited ? "rgba(255,107,107,0.28)" : "rgba(255,255,255,0.04)", stroke: selected ? "rgba(255,255,255,0.4)" : visited ? "rgba(255,107,107,0.5)" : "rgba(255,255,255,0.18)", strokeWidth: 0.5, outline: "none" },
+                            hover: { fill: visited ? "rgba(255,107,107,0.45)" : "rgba(255,107,107,0.2)", cursor: "pointer", outline: "none" },
+                            pressed: { fill: "#FF6B6B", outline: "none" },
+                          }}
+                        />
+                      );
+                    })
+                  }
+                </Geographies>
+              </ZoomableGroup>
+            </ComposableMap>
+          )}
         </div>
 
         {/* 하단 선택 바 */}
@@ -478,6 +457,15 @@ const SpotLog = () => {
               <span style={{ fontSize: 14, fontWeight: 500, color: "#FF6B6B" }}>History</span>
               <button onClick={() => setDrawerOpen(false)} style={{ color: "rgba(255,255,255,0.4)", background: "none", border: "none", cursor: "pointer" }}><X size={18} /></button>
             </div>
+
+            {/* 유저 정보 + 로그아웃 */}
+            <div style={{ padding: "12px 20px", borderBottom: "1px solid rgba(255,255,255,0.05)", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+              <p style={{ fontSize: 11, color: "rgba(255,255,255,0.3)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 160 }}>{user?.email}</p>
+              <button onClick={onLogout} style={{ display: "flex", alignItems: "center", gap: 4, padding: "4px 8px", borderRadius: 8, backgroundColor: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.08)", color: "rgba(255,255,255,0.4)", fontSize: 11, cursor: "pointer" }}>
+                <LogOut size={12} /> 로그아웃
+              </button>
+            </div>
+
             <div className="flex gap-2 px-5 py-3" style={{ borderBottom: "1px solid rgba(255,255,255,0.05)" }}>
               {years.map((y) => (
                 <button key={y} onClick={() => setFilterYear(y)} className="rounded-lg"
@@ -516,7 +504,6 @@ const SpotLog = () => {
           <div className="relative w-full" style={{ maxWidth: 420, backgroundColor: "#0D0D16", border: "1px solid rgba(255,255,255,0.08)", borderBottom: "none", borderRadius: "28px 28px 0 0", padding: "20px 20px 32px" }}>
             <div className="mx-auto mb-5" style={{ width: 36, height: 3, backgroundColor: "rgba(255,255,255,0.1)", borderRadius: 2 }} />
 
-            {/* Step 0: 업로드 */}
             {uploadStep === 0 && (
               <>
                 <h3 style={{ fontSize: 16, fontWeight: 500, color: "white", marginBottom: 20 }}>추억 업로드</h3>
@@ -536,7 +523,6 @@ const SpotLog = () => {
               </>
             )}
 
-            {/* Step 1: 분석 중 */}
             {uploadStep === 1 && (
               <div className="flex flex-col items-center gap-4" style={{ padding: "48px 0" }}>
                 <Loader2 className="animate-spin" size={32} style={{ color: "#FF6B6B" }} />
@@ -547,13 +533,10 @@ const SpotLog = () => {
               </div>
             )}
 
-            {/* Step 2: 날짜별 그룹 미리보기 */}
             {uploadStep === 2 && (
               <>
                 <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
-                  <h3 style={{ fontSize: 16, fontWeight: 500, color: "white" }}>
-                    {pendingGroups.length}일의 추억 발견
-                  </h3>
+                  <h3 style={{ fontSize: 16, fontWeight: 500, color: "white" }}>{pendingGroups.length}일의 추억 발견</h3>
                   {isAnalyzing && (
                     <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                       <Loader2 size={13} className="animate-spin" style={{ color: "#FF6B6B" }} />
@@ -561,30 +544,16 @@ const SpotLog = () => {
                     </div>
                   )}
                 </div>
-
-                {/* 그룹 목록 */}
                 <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 16, maxHeight: 280, overflowY: "auto" }}>
-                  {pendingGroups.map((group, idx) => (
-                    <DateGroupCard key={idx} group={group} index={idx} total={pendingGroups.length} />
-                  ))}
+                  {pendingGroups.map((group, idx) => <DateGroupCard key={idx} group={group} index={idx} />)}
                 </div>
-
-                <button
-                  onClick={handleSave}
-                  disabled={isAnalyzing}
-                  className="w-full rounded-xl"
-                  style={{
-                    padding: 14, backgroundColor: isAnalyzing ? "rgba(255,107,107,0.4)" : "#FF6B6B",
-                    color: "white", fontSize: 14, fontWeight: 500, border: "none",
-                    cursor: isAnalyzing ? "not-allowed" : "pointer", transition: "background 0.2s"
-                  }}
-                >
+                <button onClick={handleSave} disabled={isAnalyzing} className="w-full rounded-xl"
+                  style={{ padding: 14, backgroundColor: isAnalyzing ? "rgba(255,107,107,0.4)" : "#FF6B6B", color: "white", fontSize: 14, fontWeight: 500, border: "none", cursor: isAnalyzing ? "not-allowed" : "pointer" }}>
                   {isAnalyzing ? "분석 완료 후 저장 가능" : `${pendingGroups.length}개 기록 저장하기`}
                 </button>
               </>
             )}
 
-            {/* Step 3: GPS 없음 */}
             {uploadStep === 3 && (
               <>
                 <h3 style={{ fontSize: 16, fontWeight: 500, color: "white", marginBottom: 16 }}>위치 정보 없음</h3>
@@ -595,18 +564,9 @@ const SpotLog = () => {
                     <p style={{ fontSize: 11, color: "rgba(255,255,255,0.25)", lineHeight: 1.6 }}>카메라 앱에서 위치 권한을 허용하거나<br />지도에서 구역을 먼저 선택 후 기록해보세요</p>
                   </div>
                 </div>
-                <div style={{ display: "flex", gap: 8, marginTop: 16 }}>
-                  <button onClick={() => setUploadStep(0)} className="rounded-xl"
-                    style={{ flex: 1, padding: 12, backgroundColor: "rgba(255,255,255,0.06)", color: "rgba(255,255,255,0.6)", fontSize: 13, border: "1px solid rgba(255,255,255,0.1)", cursor: "pointer" }}>
-                    다시 선택
-                  </button>
-                  {selectedRegion && (
-                    <button onClick={() => { setVisitedLogs([{ id: Date.now(), regionName: selectedRegion, date: formatDate(new Date()), points: [] }, ...visitedLogs]); closeModal(); }} className="rounded-xl"
-                      style={{ flex: 1, padding: 12, backgroundColor: "#FF6B6B", color: "white", fontSize: 13, border: "none", cursor: "pointer" }}>
-                      {selectedRegion}만 저장
-                    </button>
-                  )}
-                </div>
+                <button onClick={() => setUploadStep(0)} className="rounded-xl" style={{ width: "100%", marginTop: 16, padding: 12, backgroundColor: "rgba(255,255,255,0.06)", color: "rgba(255,255,255,0.6)", fontSize: 13, border: "1px solid rgba(255,255,255,0.1)", cursor: "pointer" }}>
+                  다시 선택
+                </button>
               </>
             )}
           </div>
