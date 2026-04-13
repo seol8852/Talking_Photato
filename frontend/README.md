@@ -22,14 +22,16 @@ index.html: 메인 엔트리 페이지
 vite.config.js: Vite 빌드 및 개발 환경 설정
 
 🚀 Getting Started
+
 1. 의존성 설치
 프로젝트 실행을 위해 필요한 패키지들을 설치합니다.
 
 Bash
-npm install
+npm install --legacy-peer-deps
 2. 개발 서버 실행
 Vite 개발 서버를 구동합니다.
 
 Bash
 npm run dev
 기본적으로 http://localhost:5173에서 확인할 수 있습니다.
+
