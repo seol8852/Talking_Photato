@@ -126,6 +126,113 @@ const waitForKakao = (timeout = 5000) => {
   });
 };
 
+// ── 좌표 → 장소명 + 주소 ──
+// 반경 50m 먼저 → 없으면 200m → 주소 병행
+// 복합건물(백화점·역 등)이면 isNearby=true
+const COMPLEX_KEYWORDS = ["백화점", "몰", "쇼핑", "마트", "터미널", "역", "공항", "대학교", "병원", "호텔", "아울렛"];
+
+const getPlaceInfo = (lat, lng) => {
+  return new Promise((resolve) => {
+    if (!window.kakao?.maps?.services) {
+      resolve({ placeName: null, address: null, isNearby: false });
+      return;
+    }
+    const { kakao } = window;
+    const ps = new kakao.maps.services.Places();
+    const geocoder = new kakao.maps.services.Geocoder();
+    const latlng = new kakao.maps.LatLng(lat, lng);
+
+    // 도로명 주소 조회
+    const getAddress = () => new Promise((res) => {
+      geocoder.coord2Address(lng, lat, (result, status) => {
+        if (status !== kakao.maps.services.Status.OK || !result[0]) { res(null); return; }
+        const r = result[0];
+        const addr = r.road_address
+          ? `${r.road_address.region_2depth_name} ${r.road_address.road_name}`
+          : `${r.address.region_2depth_name} ${r.address.sub_locality || r.address.region_3depth_name}`;
+        res(addr || null);
+      });
+    });
+
+    // 키워드 검색 (반경 지정)
+    const searchPlaces = (radius) => new Promise((res) => {
+      ps.keywordSearch(" ", (result, status) => {
+        if (status === kakao.maps.services.Status.OK && result?.length > 0) {
+          const sorted = [...result].sort((a, b) => Number(a.distance) - Number(b.distance));
+          res(sorted[0]);
+        } else {
+          res(null);
+        }
+      }, { location: latlng, radius, sort: kakao.maps.services.SortBy.DISTANCE });
+    });
+
+    Promise.all([searchPlaces(50), getAddress()]).then(async ([place50, address]) => {
+      const bestPlace = place50 || (await searchPlaces(200));
+      if (!bestPlace) {
+        resolve({ placeName: null, address, isNearby: false });
+        return;
+      }
+      const isNearby = COMPLEX_KEYWORDS.some((kw) => bestPlace.place_name.includes(kw));
+      resolve({ placeName: bestPlace.place_name, address, isNearby });
+    });
+  });
+};
+
+// ── 포인트 카드 컴포넌트 ──
+const PointCard = ({ point, index, total }) => {
+  const [placeInfo, setPlaceInfo] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    getPlaceInfo(point.lat, point.lng).then((info) => {
+      setPlaceInfo(info);
+      setLoading(false);
+    });
+  }, [point.lat, point.lng]);
+
+  const isFirst = index === 0;
+  const isLast = index === total - 1;
+  const label = isFirst ? "🚀 출발" : isLast ? "🏁 도착" : `📍 ${index + 1}`;
+
+  return (
+    <div style={{ flexShrink: 0, padding: "10px 14px", backgroundColor: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.07)", borderRadius: 14, minWidth: 140, maxWidth: 200 }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
+        <span style={{ fontSize: 10, color: "#FF6B6B" }}>{label}</span>
+        {point.time && (
+          <span style={{ fontSize: 10, color: "rgba(255,255,255,0.25)" }}>
+            {new Date(point.time).toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" })}
+          </span>
+        )}
+      </div>
+      {loading ? (
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <Loader2 size={11} className="animate-spin" style={{ color: "rgba(255,255,255,0.3)" }} />
+          <span style={{ fontSize: 11, color: "rgba(255,255,255,0.3)" }}>조회 중...</span>
+        </div>
+      ) : placeInfo?.placeName ? (
+        <>
+          <p style={{ fontSize: 12, fontWeight: 500, color: "white", marginBottom: 3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            {placeInfo.placeName}{placeInfo.isNearby ? " 근처" : ""}
+          </p>
+          {placeInfo.address && (
+            <p style={{ fontSize: 10, color: "rgba(255,255,255,0.35)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              {placeInfo.address}
+            </p>
+          )}
+        </>
+      ) : placeInfo?.address ? (
+        <p style={{ fontSize: 12, color: "rgba(255,255,255,0.6)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          {placeInfo.address}
+        </p>
+      ) : (
+        <p style={{ fontSize: 11, color: "rgba(255,255,255,0.3)" }}>
+          {point.lat.toFixed(4)}, {point.lng.toFixed(4)}
+        </p>
+      )}
+    </div>
+  );
+};
+
 // ── 카카오 상세 지도 ──
 const KakaoDetailMap = ({ data, onBack }) => {
   const mapContainer = useRef(null);
@@ -218,14 +325,11 @@ const KakaoDetailMap = ({ data, onBack }) => {
         </div>
       )}
       <div ref={mapContainer} style={{ flex: 1, width: "100%", minHeight: 0 }} />
+      {/* 하단 포인트 카드 — 장소명 + 주소 표시 */}
       {isMapReady && (
         <div style={{ padding: "12px 16px", backgroundColor: "#0D0D16", borderTop: "1px solid rgba(255,255,255,0.07)", display: "flex", gap: 8, overflowX: "auto", flexShrink: 0 }}>
           {data.points.map((p, idx) => (
-            <div key={idx} style={{ flexShrink: 0, padding: "8px 12px", backgroundColor: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.07)", borderRadius: 12, minWidth: 90 }}>
-              <p style={{ fontSize: 10, color: "#FF6B6B", marginBottom: 3 }}>{idx === 0 ? "🚀 출발" : idx === data.points.length - 1 ? "🏁 도착" : `📍 ${idx + 1}`}</p>
-              <p style={{ fontSize: 11, color: "rgba(255,255,255,0.5)" }}>{p.lat.toFixed(4)}, {p.lng.toFixed(4)}</p>
-              {p.time && <p style={{ fontSize: 10, color: "rgba(255,255,255,0.25)", marginTop: 2 }}>{new Date(p.time).toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" })}</p>}
-            </div>
+            <PointCard key={idx} point={p} index={idx} total={data.points.length} />
           ))}
         </div>
       )}
@@ -234,104 +338,74 @@ const KakaoDetailMap = ({ data, onBack }) => {
 };
 
 // ── 여행 상세 화면 ──
-const TripDetailView = ({ trip, visits, onBack, onViewDetail, onDeleteVisit, onDeleteTrip }) => {
-  return (
-    <div style={{ position: "fixed", inset: 0, zIndex: 5000, backgroundColor: "#0A0A0F", display: "flex", flexDirection: "column" }}>
-      {/* 헤더 */}
-      <div style={{ padding: "16px 20px", display: "flex", alignItems: "center", gap: 12, borderBottom: "1px solid rgba(255,255,255,0.08)", flexShrink: 0 }}>
-        <button onClick={onBack} style={{ width: 36, height: 36, display: "flex", alignItems: "center", justifyContent: "center", borderRadius: 12, backgroundColor: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.1)", color: "white", cursor: "pointer" }}>
-          <ArrowLeft size={18} />
-        </button>
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <p style={{ fontSize: 11, color: "rgba(255,255,255,0.3)", letterSpacing: "0.08em", textTransform: "uppercase", marginBottom: 2 }}>Trip</p>
-          <h3 style={{ fontSize: 15, fontWeight: 500, color: "white", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{trip.title}</h3>
-        </div>
-        <button
-          onClick={() => onDeleteTrip(trip.id)}
-          style={{ padding: "6px 10px", borderRadius: 10, backgroundColor: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.08)", color: "rgba(255,255,255,0.3)", cursor: "pointer", display: "flex", alignItems: "center", gap: 4, fontSize: 11 }}
-        >
-          <Trash2 size={13} /> 삭제
-        </button>
+const TripDetailView = ({ trip, visits, onBack, onViewDetail, onDeleteVisit, onDeleteTrip }) => (
+  <div style={{ position: "fixed", inset: 0, zIndex: 5000, backgroundColor: "#0A0A0F", display: "flex", flexDirection: "column" }}>
+    <div style={{ padding: "16px 20px", display: "flex", alignItems: "center", gap: 12, borderBottom: "1px solid rgba(255,255,255,0.08)", flexShrink: 0 }}>
+      <button onClick={onBack} style={{ width: 36, height: 36, display: "flex", alignItems: "center", justifyContent: "center", borderRadius: 12, backgroundColor: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.1)", color: "white", cursor: "pointer" }}>
+        <ArrowLeft size={18} />
+      </button>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <p style={{ fontSize: 11, color: "rgba(255,255,255,0.3)", letterSpacing: "0.08em", textTransform: "uppercase", marginBottom: 2 }}>Trip</p>
+        <h3 style={{ fontSize: 15, fontWeight: 500, color: "white", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{trip.title}</h3>
       </div>
-
-      {/* 여행 기간 */}
-      <div style={{ padding: "14px 20px", borderBottom: "1px solid rgba(255,255,255,0.06)", display: "flex", alignItems: "center", gap: 8 }}>
-        <Calendar size={14} style={{ color: "rgba(255,255,255,0.3)" }} />
-        <span style={{ fontSize: 13, color: "rgba(255,255,255,0.5)" }}>
-          {trip.started_at} ~ {trip.ended_at}
-        </span>
-        <span style={{ marginLeft: "auto", fontSize: 11, color: "rgba(255,255,255,0.25)" }}>
-          총 {visits.length}일
-        </span>
-      </div>
-
-      {/* 날짜별 방문 목록 */}
-      <div style={{ flex: 1, overflowY: "auto", padding: "16px" }}>
-        {visits.length === 0 ? (
-          <p style={{ textAlign: "center", fontSize: 12, color: "rgba(255,255,255,0.2)", padding: "40px 0", fontStyle: "italic" }}>기록이 없어요</p>
-        ) : (
-          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-            {visits.map((visit, idx) => (
-              <div
-                key={visit.id}
-                style={{ backgroundColor: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)", borderRadius: 16, overflow: "hidden" }}
-              >
-                {/* 날짜 헤더 */}
-                <div style={{ padding: "12px 16px", borderBottom: "1px solid rgba(255,255,255,0.05)", display: "flex", alignItems: "center", gap: 10 }}>
-                  <div style={{ width: 24, height: 24, borderRadius: "50%", backgroundColor: "rgba(255,107,107,0.15)", border: "1px solid rgba(255,107,107,0.3)", display: "flex", alignItems: "center", justifyContent: "center" }}>
-                    <span style={{ fontSize: 10, color: "#FF6B6B", fontWeight: 600 }}>Day {idx + 1}</span>
-                  </div>
-                  <span style={{ fontSize: 13, color: "rgba(255,255,255,0.6)" }}>{visit.date}</span>
-                  <span style={{ marginLeft: "auto", fontSize: 11, color: "rgba(255,107,107,0.6)" }}>📍 {visit.regionName}</span>
+      <button onClick={() => onDeleteTrip(trip.id)} style={{ padding: "6px 10px", borderRadius: 10, backgroundColor: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.08)", color: "rgba(255,255,255,0.3)", cursor: "pointer", display: "flex", alignItems: "center", gap: 4, fontSize: 11 }}>
+        <Trash2 size={13} /> 삭제
+      </button>
+    </div>
+    <div style={{ padding: "14px 20px", borderBottom: "1px solid rgba(255,255,255,0.06)", display: "flex", alignItems: "center", gap: 8 }}>
+      <Calendar size={14} style={{ color: "rgba(255,255,255,0.3)" }} />
+      <span style={{ fontSize: 13, color: "rgba(255,255,255,0.5)" }}>{trip.started_at} ~ {trip.ended_at}</span>
+      <span style={{ marginLeft: "auto", fontSize: 11, color: "rgba(255,255,255,0.25)" }}>총 {visits.length}일</span>
+    </div>
+    <div style={{ flex: 1, overflowY: "auto", padding: 16 }}>
+      {visits.length === 0 ? (
+        <p style={{ textAlign: "center", fontSize: 12, color: "rgba(255,255,255,0.2)", padding: "40px 0", fontStyle: "italic" }}>기록이 없어요</p>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          {visits.map((visit, idx) => (
+            <div key={visit.id} style={{ backgroundColor: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)", borderRadius: 16, overflow: "hidden" }}>
+              <div style={{ padding: "12px 16px", borderBottom: "1px solid rgba(255,255,255,0.05)", display: "flex", alignItems: "center", gap: 10 }}>
+                <div style={{ width: 24, height: 24, borderRadius: "50%", backgroundColor: "rgba(255,107,107,0.15)", border: "1px solid rgba(255,107,107,0.3)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                  <span style={{ fontSize: 10, color: "#FF6B6B", fontWeight: 600 }}>Day {idx + 1}</span>
                 </div>
-
-                {/* 포인트 수 + 버튼 */}
-                <div style={{ padding: "12px 16px", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-                  <span style={{ fontSize: 12, color: "rgba(255,255,255,0.3)" }}>
-                    {visit.points.length > 0 ? `${visit.points.length}곳 방문` : "위치 정보 없음"}
-                  </span>
-                  <div style={{ display: "flex", gap: 8 }}>
-                    <button
-                      onClick={() => onDeleteVisit(visit.id)}
-                      style={{ padding: "6px 10px", borderRadius: 8, backgroundColor: "transparent", border: "1px solid rgba(255,255,255,0.08)", color: "rgba(255,255,255,0.25)", cursor: "pointer", fontSize: 11, display: "flex", alignItems: "center", gap: 4 }}
-                    >
-                      <Trash2 size={12} />
-                    </button>
-                    <button
-                      onClick={() => onViewDetail(visit)}
-                      style={{ padding: "6px 14px", borderRadius: 8, backgroundColor: "rgba(255,107,107,0.1)", border: "1px solid rgba(255,107,107,0.2)", color: "#FF6B6B", cursor: "pointer", fontSize: 12, display: "flex", alignItems: "center", gap: 4 }}
-                    >
-                      동선 보기 <ChevronRight size={13} />
-                    </button>
-                  </div>
+                <span style={{ fontSize: 13, color: "rgba(255,255,255,0.6)" }}>{visit.date}</span>
+                <span style={{ marginLeft: "auto", fontSize: 11, color: "rgba(255,107,107,0.6)" }}>📍 {visit.regionName}</span>
+              </div>
+              <div style={{ padding: "12px 16px", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                <span style={{ fontSize: 12, color: "rgba(255,255,255,0.3)" }}>{visit.points.length > 0 ? `${visit.points.length}곳 방문` : "위치 정보 없음"}</span>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button onClick={() => onDeleteVisit(visit.id)} style={{ padding: "6px 10px", borderRadius: 8, backgroundColor: "transparent", border: "1px solid rgba(255,255,255,0.08)", color: "rgba(255,255,255,0.25)", cursor: "pointer", display: "flex", alignItems: "center" }}>
+                    <Trash2 size={12} />
+                  </button>
+                  <button onClick={() => onViewDetail(visit)} style={{ padding: "6px 14px", borderRadius: 8, backgroundColor: "rgba(255,107,107,0.1)", border: "1px solid rgba(255,107,107,0.2)", color: "#FF6B6B", cursor: "pointer", fontSize: 12, display: "flex", alignItems: "center", gap: 4 }}>
+                    동선 보기 <ChevronRight size={13} />
+                  </button>
                 </div>
               </div>
-            ))}
-          </div>
-        )}
-      </div>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
-  );
-};
+  </div>
+);
 
 // ── 메인 앱 ──
 const SpotLog = ({ user, couple, onLogout }) => {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const [selectedRegion, setSelectedRegion] = useState(null);
-  const [uploadStep, setUploadStep] = useState(0); // 0:idle 1:exif 2:title 3:preview 4:no-gps
+  const [uploadStep, setUploadStep] = useState(0);
   const [previewFile, setPreviewFile] = useState(null);
   const [pendingGroups, setPendingGroups] = useState([]);
   const [tripTitle, setTripTitle] = useState("");
   const [viewDetail, setViewDetail] = useState(null);
   const [viewTrip, setViewTrip] = useState(null);
   const [filterYear, setFilterYear] = useState("전체");
-
   const [trips, setTrips] = useState([]);
   const [visits, setVisits] = useState([]);
   const [dbLoading, setDbLoading] = useState(true);
 
-  // ── DB 조회 ──
   const fetchAll = async () => {
     const [{ data: tripsData }, { data: visitsData }] = await Promise.all([
       supabase.from("trips").select("*").eq("couple_id", couple.id).order("started_at", { ascending: false }),
@@ -353,17 +427,11 @@ const SpotLog = ({ user, couple, onLogout }) => {
   }, [couple.id]);
 
   const getGeoKey = (geo) => buildKeyFromCode(geo.properties.name, geo.properties.code);
-
-  // 지도 색칠용: 모든 visit의 regionName
   const visitedNames = visits.map((v) => v.regionName);
-
-  // 여행에 속한 visits
   const getVisitsForTrip = (tripId) => visits.filter((v) => v.tripId === tripId);
-
   const years = ["전체", ...new Set(trips.map((t) => t.started_at.split(".")[0]))].reverse();
   const filteredTrips = filterYear === "전체" ? trips : trips.filter((t) => t.started_at.startsWith(filterYear));
 
-  // ── 파일 업로드 & EXIF 파싱 ──
   const handleFileUpload = async (e) => {
     const files = Array.from(e.target.files);
     if (!files.length) return;
@@ -373,139 +441,93 @@ const SpotLog = ({ user, couple, onLogout }) => {
       const points = await extractPointsFromFiles(files);
       if (points.length === 0) { setUploadStep(4); return; }
       const groups = groupPointsByDate(points);
-      const initialGroups = groups.map((g) => ({ ...g, regionName: null, dominantPoints: null, totalPoints: g.points.length, analyzing: true }));
-      setPendingGroups(initialGroups);
-
-      // 여행 제목 입력 단계로
+      setPendingGroups(groups.map((g) => ({ ...g, regionName: null, dominantPoints: null, totalPoints: g.points.length, analyzing: true })));
       setUploadStep(2);
-
-      // 백그라운드에서 지역 분석
       const kakaoReady = await waitForKakao(3000);
       if (kakaoReady) {
         for (let i = 0; i < groups.length; i++) {
           const { regionName, points: dominantPoints } = await getDominantRegionAndPoints(groups[i].points);
-          setPendingGroups((prev) =>
-            prev.map((g, idx) => idx === i ? { ...g, regionName: regionName || null, dominantPoints, analyzing: false } : g)
-          );
+          setPendingGroups((prev) => prev.map((g, idx) => idx === i ? { ...g, regionName: regionName || null, dominantPoints, analyzing: false } : g));
         }
       } else {
         setPendingGroups((prev) => prev.map((g) => ({ ...g, regionName: null, dominantPoints: g.points, analyzing: false })));
       }
     } catch (err) {
-      console.error("EXIF 처리 오류:", err);
       setUploadStep(4);
     }
   };
 
-  // ── 저장: trip 생성 → visits 일괄 삽입 ──
   const handleSave = async () => {
     const title = tripTitle.trim() || "우리의 여행";
-    const dates = pendingGroups
-      .filter((g) => g.date)
-      .map((g) => formatDate(g.date))
-      .sort();
+    const dates = pendingGroups.filter((g) => g.date).map((g) => formatDate(g.date)).sort();
     const startedAt = dates[0] || formatDate(new Date());
     const endedAt = dates[dates.length - 1] || startedAt;
-
-    // 1) trip 생성
     const { data: tripData, error: tripError } = await supabase
-      .from("trips")
-      .insert({ couple_id: couple.id, title, started_at: startedAt, ended_at: endedAt })
+      .from("trips").insert({ couple_id: couple.id, title, started_at: startedAt, ended_at: endedAt })
       .select().single();
-    if (tripError) { console.error("여행 생성 실패:", tripError); alert("저장에 실패했어요."); return; }
-
-    // 2) visits 일괄 삽입
+    if (tripError) { alert("저장에 실패했어요."); return; }
     const rows = pendingGroups.map((group) => ({
-      couple_id: couple.id,
-      trip_id: tripData.id,
+      couple_id: couple.id, trip_id: tripData.id,
       region_name: group.regionName || selectedRegion || "알 수 없는 지역",
       date: group.date ? formatDate(group.date) : formatDate(new Date()),
       points: group.dominantPoints || group.points,
     }));
-    const { error: visitsError } = await supabase.from("visits").insert(rows);
-    if (visitsError) { console.error("기록 저장 실패:", visitsError); alert("저장에 실패했어요."); return; }
-
+    const { error } = await supabase.from("visits").insert(rows);
+    if (error) { alert("저장에 실패했어요."); return; }
     closeModal();
   };
 
-  // ── GPS 없이 구역만 저장 ──
   const handleSaveWithSelectedRegion = async () => {
     if (!selectedRegion) return;
-    const title = tripTitle.trim() || selectedRegion;
     const today = formatDate(new Date());
-    const { data: tripData, error: tripError } = await supabase
-      .from("trips")
-      .insert({ couple_id: couple.id, title, started_at: today, ended_at: today })
+    const { data: tripData, error } = await supabase
+      .from("trips").insert({ couple_id: couple.id, title: tripTitle.trim() || selectedRegion, started_at: today, ended_at: today })
       .select().single();
-    if (tripError) { alert("저장에 실패했어요."); return; }
+    if (error) { alert("저장에 실패했어요."); return; }
     await supabase.from("visits").insert([{ couple_id: couple.id, trip_id: tripData.id, region_name: selectedRegion, date: today, points: [] }]);
     closeModal();
   };
 
-  // ── 여행 삭제 (cascade로 visits도 삭제됨) ──
   const deleteTrip = async (tripId) => {
-    if (!window.confirm("이 여행 전체를 삭제할까요? 안에 있는 기록도 모두 사라져요.")) return;
+    if (!window.confirm("이 여행 전체를 삭제할까요?")) return;
     await supabase.from("trips").delete().eq("id", tripId);
     setViewTrip(null);
   };
 
-  // ── visit 개별 삭제 ──
   const deleteVisit = async (visitId) => {
     if (!window.confirm("이 날의 기록을 삭제할까요?")) return;
     await supabase.from("visits").delete().eq("id", visitId);
   };
 
   const closeModal = () => {
-    setModalOpen(false);
-    setUploadStep(0);
-    setPreviewFile(null);
-    setPendingGroups([]);
-    setTripTitle("");
+    setModalOpen(false); setUploadStep(0);
+    setPreviewFile(null); setPendingGroups([]); setTripTitle("");
   };
 
   const isAnalyzing = pendingGroups.some((g) => g.analyzing);
-
-  // 현재 보고있는 여행의 visits
   const currentTripVisits = viewTrip ? getVisitsForTrip(viewTrip.id) : [];
 
   return (
     <div className="w-full max-w-screen-xl mx-auto h-screen flex flex-col overflow-hidden relative" style={{ backgroundColor: "#0A0A0F", colorScheme: "dark" }}>
-
-      {/* 카카오 상세 지도 */}
       {viewDetail && <KakaoDetailMap data={viewDetail} onBack={() => setViewDetail(null)} />}
-
-      {/* 여행 상세 화면 */}
       {viewTrip && !viewDetail && (
-        <TripDetailView
-          trip={viewTrip}
-          visits={currentTripVisits}
-          onBack={() => setViewTrip(null)}
-          onViewDetail={(visit) => setViewDetail(visit)}
-          onDeleteVisit={deleteVisit}
-          onDeleteTrip={deleteTrip}
-        />
+        <TripDetailView trip={viewTrip} visits={currentTripVisits} onBack={() => setViewTrip(null)}
+          onViewDetail={(v) => setViewDetail(v)} onDeleteVisit={deleteVisit} onDeleteTrip={deleteTrip} />
       )}
-
       <div className="fixed top-0 left-1/2 -translate-x-1/2 pointer-events-none z-0" style={{ width: 600, height: 240, background: "radial-gradient(ellipse, rgba(255,107,107,0.07) 0%, transparent 70%)", filter: "blur(40px)" }} />
 
       {/* HEADER */}
       <header className="fixed top-0 left-1/2 -translate-x-1/2 w-full max-w-screen-xl z-50 flex items-center justify-between px-5 py-4" style={{ background: "linear-gradient(to bottom, #0A0A0F 60%, transparent)" }}>
-        <button onClick={() => setDrawerOpen(true)} className="w-9 h-9 flex items-center justify-center rounded-xl" style={{ backgroundColor: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.1)", color: "white", cursor: "pointer" }}>
-          <Menu size={18} />
-        </button>
+        <button onClick={() => setDrawerOpen(true)} className="w-9 h-9 flex items-center justify-center rounded-xl" style={{ backgroundColor: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.1)", color: "white", cursor: "pointer" }}><Menu size={18} /></button>
         <div className="flex items-center gap-2">
           <Heart size={14} fill="#FF6B6B" color="#FF6B6B" />
           <span style={{ fontSize: 15, fontWeight: 500, letterSpacing: "0.14em", color: "#FF6B6B", textTransform: "uppercase" }}>SpotLog</span>
         </div>
-        <button onClick={() => setModalOpen(true)} className="w-9 h-9 flex items-center justify-center rounded-xl" style={{ backgroundColor: "#FF6B6B", color: "white", border: "none", cursor: "pointer", boxShadow: "0 4px 16px rgba(255,107,107,0.3)" }}>
-          <Plus size={18} />
-        </button>
+        <button onClick={() => setModalOpen(true)} className="w-9 h-9 flex items-center justify-center rounded-xl" style={{ backgroundColor: "#FF6B6B", color: "white", border: "none", cursor: "pointer", boxShadow: "0 4px 16px rgba(255,107,107,0.3)" }}><Plus size={18} /></button>
       </header>
 
       {/* MAIN */}
       <main className="flex-1 pt-[72px] pb-4 px-4 flex flex-col gap-3 relative z-10 overflow-hidden">
-
-        {/* 통계 바 */}
         <div className="flex justify-between items-center px-4 py-3.5 rounded-2xl" style={{ backgroundColor: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)" }}>
           <div>
             <p style={{ fontSize: 10, color: "rgba(255,255,255,0.3)", letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 4 }}>Our Footprints</p>
@@ -522,7 +544,6 @@ const SpotLog = ({ user, couple, onLogout }) => {
           </div>
         </div>
 
-        {/* 지도 */}
         <div className="flex-1 rounded-3xl overflow-hidden" style={{ backgroundColor: "rgba(255,255,255,0.015)", border: "1px solid rgba(255,255,255,0.04)", minHeight: 280 }}>
           {dbLoading ? (
             <div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center" }}>
@@ -554,7 +575,6 @@ const SpotLog = ({ user, couple, onLogout }) => {
           )}
         </div>
 
-        {/* 하단 선택 바 */}
         <div className="shrink-0">
           {selectedRegion ? (
             <div className="flex items-center gap-3 px-4 py-3.5 rounded-2xl" style={{ backgroundColor: "#16161F", border: "1px solid rgba(255,107,107,0.2)" }}>
@@ -566,22 +586,14 @@ const SpotLog = ({ user, couple, onLogout }) => {
                 <p style={{ fontSize: 15, fontWeight: 500, color: "white", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{selectedRegion}</p>
               </div>
               {visitedNames.includes(selectedRegion) ? (
-                <button
-                  onClick={() => {
-                    const relatedVisit = visits.find((v) => v.regionName === selectedRegion);
-                    if (relatedVisit?.tripId) {
-                      const trip = trips.find((t) => t.id === relatedVisit.tripId);
-                      if (trip) setViewTrip(trip);
-                    }
-                  }}
-                  className="rounded-xl"
-                  style={{ padding: "8px 16px", fontSize: 12, fontWeight: 500, color: "rgba(255,255,255,0.6)", backgroundColor: "rgba(255,255,255,0.08)", border: "1px solid rgba(255,255,255,0.1)", flexShrink: 0, cursor: "pointer" }}
-                >
+                <button onClick={() => {
+                  const rv = visits.find((v) => v.regionName === selectedRegion);
+                  if (rv?.tripId) { const t = trips.find((t) => t.id === rv.tripId); if (t) setViewTrip(t); }
+                }} className="rounded-xl" style={{ padding: "8px 16px", fontSize: 12, fontWeight: 500, color: "rgba(255,255,255,0.6)", backgroundColor: "rgba(255,255,255,0.08)", border: "1px solid rgba(255,255,255,0.1)", flexShrink: 0, cursor: "pointer" }}>
                   여행 보기
                 </button>
               ) : (
-                <button onClick={() => setModalOpen(true)} className="rounded-xl"
-                  style={{ padding: "8px 16px", fontSize: 12, fontWeight: 500, color: "white", backgroundColor: "#FF6B6B", border: "none", flexShrink: 0, cursor: "pointer" }}>
+                <button onClick={() => setModalOpen(true)} className="rounded-xl" style={{ padding: "8px 16px", fontSize: 12, fontWeight: 500, color: "white", backgroundColor: "#FF6B6B", border: "none", flexShrink: 0, cursor: "pointer" }}>
                   기록하기
                 </button>
               )}
@@ -617,48 +629,34 @@ const SpotLog = ({ user, couple, onLogout }) => {
                 </button>
               ))}
             </div>
-
-            {/* 여행 목록 */}
             <div className="flex-1 overflow-y-auto px-4 py-4" style={{ display: "flex", flexDirection: "column", gap: 8 }}>
               {filteredTrips.map((trip) => {
-                const tripVisits = getVisitsForTrip(trip.id);
+                const tv = getVisitsForTrip(trip.id);
                 return (
-                  <div
-                    key={trip.id}
-                    onClick={() => { setViewTrip(trip); setDrawerOpen(false); }}
-                    className="rounded-xl cursor-pointer"
-                    style={{ padding: "14px", backgroundColor: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.05)", transition: "border-color 0.2s" }}
+                  <div key={trip.id} onClick={() => { setViewTrip(trip); setDrawerOpen(false); }} className="rounded-xl cursor-pointer"
+                    style={{ padding: 14, backgroundColor: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.05)", transition: "border-color 0.2s" }}
                     onMouseEnter={(e) => (e.currentTarget.style.borderColor = "rgba(255,107,107,0.2)")}
                     onMouseLeave={(e) => (e.currentTarget.style.borderColor = "rgba(255,255,255,0.05)")}
                   >
-                    {/* 여행 제목 */}
                     <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
                       <p style={{ fontSize: 14, fontWeight: 500, color: "white", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 160 }}>{trip.title}</p>
                       <ChevronRight size={14} style={{ color: "rgba(255,255,255,0.25)", flexShrink: 0 }} />
                     </div>
-                    {/* 날짜 범위 */}
                     <p style={{ fontSize: 11, color: "rgba(255,255,255,0.3)", marginBottom: 8 }}>
                       {trip.started_at === trip.ended_at ? trip.started_at : `${trip.started_at} ~ ${trip.ended_at}`}
                     </p>
-                    {/* 지역 태그 */}
                     <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
-                      {[...new Set(tripVisits.map((v) => v.regionName))].slice(0, 3).map((r) => (
-                        <span key={r} style={{ fontSize: 10, color: "rgba(255,107,107,0.7)", backgroundColor: "rgba(255,107,107,0.08)", border: "1px solid rgba(255,107,107,0.15)", borderRadius: 6, padding: "2px 8px" }}>
-                          {r}
-                        </span>
+                      {[...new Set(tv.map((v) => v.regionName))].slice(0, 3).map((r) => (
+                        <span key={r} style={{ fontSize: 10, color: "rgba(255,107,107,0.7)", backgroundColor: "rgba(255,107,107,0.08)", border: "1px solid rgba(255,107,107,0.15)", borderRadius: 6, padding: "2px 8px" }}>{r}</span>
                       ))}
-                      {new Set(tripVisits.map((v) => v.regionName)).size > 3 && (
-                        <span style={{ fontSize: 10, color: "rgba(255,255,255,0.25)", padding: "2px 4px" }}>
-                          +{new Set(tripVisits.map((v) => v.regionName)).size - 3}
-                        </span>
+                      {new Set(tv.map((v) => v.regionName)).size > 3 && (
+                        <span style={{ fontSize: 10, color: "rgba(255,255,255,0.25)", padding: "2px 4px" }}>+{new Set(tv.map((v) => v.regionName)).size - 3}</span>
                       )}
                     </div>
                   </div>
                 );
               })}
-              {filteredTrips.length === 0 && (
-                <p style={{ textAlign: "center", fontSize: 12, color: "rgba(255,255,255,0.2)", padding: "40px 0", fontStyle: "italic" }}>기록이 없어요</p>
-              )}
+              {filteredTrips.length === 0 && <p style={{ textAlign: "center", fontSize: 12, color: "rgba(255,255,255,0.2)", padding: "40px 0", fontStyle: "italic" }}>기록이 없어요</p>}
             </div>
           </div>
         </div>
@@ -671,7 +669,6 @@ const SpotLog = ({ user, couple, onLogout }) => {
           <div className="relative w-full" style={{ maxWidth: 420, backgroundColor: "#0D0D16", border: "1px solid rgba(255,255,255,0.08)", borderBottom: "none", borderRadius: "28px 28px 0 0", padding: "20px 20px 32px" }}>
             <div className="mx-auto mb-5" style={{ width: 36, height: 3, backgroundColor: "rgba(255,255,255,0.1)", borderRadius: 2 }} />
 
-            {/* Step 0: 사진 선택 */}
             {uploadStep === 0 && (
               <>
                 <h3 style={{ fontSize: 16, fontWeight: 500, color: "white", marginBottom: 20 }}>추억 업로드</h3>
@@ -691,7 +688,6 @@ const SpotLog = ({ user, couple, onLogout }) => {
               </>
             )}
 
-            {/* Step 1: EXIF 분석 중 */}
             {uploadStep === 1 && (
               <div className="flex flex-col items-center gap-4" style={{ padding: "48px 0" }}>
                 <Loader2 className="animate-spin" size={32} style={{ color: "#FF6B6B" }} />
@@ -702,61 +698,39 @@ const SpotLog = ({ user, couple, onLogout }) => {
               </div>
             )}
 
-            {/* Step 2: 여행 이름 입력 */}
             {uploadStep === 2 && (
               <>
                 <h3 style={{ fontSize: 16, fontWeight: 500, color: "white", marginBottom: 6 }}>여행 이름 짓기</h3>
-                <p style={{ fontSize: 12, color: "rgba(255,255,255,0.35)", marginBottom: 20 }}>
-                  {pendingGroups.length}일치 사진이 감지됐어요. 이 여행의 이름을 지어주세요!
-                </p>
+                <p style={{ fontSize: 12, color: "rgba(255,255,255,0.35)", marginBottom: 20 }}>{pendingGroups.length}일치 사진이 감지됐어요</p>
                 <div style={{ position: "relative", marginBottom: 16 }}>
                   <Pencil size={15} style={{ position: "absolute", left: 14, top: "50%", transform: "translateY(-50%)", color: "rgba(255,255,255,0.3)" }} />
-                  <input
-                    type="text"
-                    placeholder="예: 경주 벚꽃 여행 🌸"
-                    value={tripTitle}
-                    onChange={(e) => setTripTitle(e.target.value)}
-                    maxLength={30}
+                  <input type="text" placeholder="예: 잠실 벚꽃 여행 🌸" value={tripTitle} onChange={(e) => setTripTitle(e.target.value)} maxLength={30} autoFocus
                     style={{ width: "100%", padding: "12px 16px 12px 40px", borderRadius: 12, backgroundColor: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.1)", color: "white", fontSize: 14, outline: "none", boxSizing: "border-box" }}
                     onFocus={(e) => (e.target.style.borderColor = "rgba(255,107,107,0.4)")}
                     onBlur={(e) => (e.target.style.borderColor = "rgba(255,255,255,0.1)")}
-                    autoFocus
                   />
                 </div>
-
-                {/* 감지된 날짜 미리보기 */}
                 <div style={{ padding: "12px 14px", backgroundColor: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.06)", borderRadius: 12, marginBottom: 20 }}>
                   <p style={{ fontSize: 11, color: "rgba(255,255,255,0.3)", marginBottom: 8 }}>감지된 일정</p>
-                  <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                    {pendingGroups.map((g, idx) => (
-                      <div key={idx} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12 }}>
-                        <span style={{ color: "rgba(255,107,107,0.6)", minWidth: 40 }}>Day {idx + 1}</span>
-                        <span style={{ color: "rgba(255,255,255,0.4)" }}>{g.date ? formatDate(g.date) : "날짜 미상"}</span>
-                        {g.analyzing
-                          ? <Loader2 size={10} className="animate-spin" style={{ color: "rgba(255,255,255,0.2)", marginLeft: "auto" }} />
-                          : <span style={{ color: "rgba(255,107,107,0.5)", marginLeft: "auto" }}>{g.regionName || "분석 중"}</span>
-                        }
-                      </div>
-                    ))}
-                  </div>
+                  {pendingGroups.map((g, idx) => (
+                    <div key={idx} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, marginBottom: 4 }}>
+                      <span style={{ color: "rgba(255,107,107,0.6)", minWidth: 40 }}>Day {idx + 1}</span>
+                      <span style={{ color: "rgba(255,255,255,0.4)" }}>{g.date ? formatDate(g.date) : "날짜 미상"}</span>
+                      {g.analyzing
+                        ? <Loader2 size={10} className="animate-spin" style={{ color: "rgba(255,255,255,0.2)", marginLeft: "auto" }} />
+                        : <span style={{ color: "rgba(255,107,107,0.5)", marginLeft: "auto" }}>{g.regionName || "분석 중"}</span>
+                      }
+                    </div>
+                  ))}
                 </div>
-
-                <button
-                  onClick={() => setUploadStep(3)}
-                  style={{ width: "100%", padding: 14, backgroundColor: "#FF6B6B", color: "white", fontSize: 14, fontWeight: 500, border: "none", borderRadius: 12, cursor: "pointer" }}
-                >
-                  다음
-                </button>
+                <button onClick={() => setUploadStep(3)} style={{ width: "100%", padding: 14, backgroundColor: "#FF6B6B", color: "white", fontSize: 14, fontWeight: 500, border: "none", borderRadius: 12, cursor: "pointer" }}>다음</button>
               </>
             )}
 
-            {/* Step 3: 최종 확인 및 저장 */}
             {uploadStep === 3 && (
               <>
                 <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 16 }}>
-                  <button onClick={() => setUploadStep(2)} style={{ background: "none", border: "none", color: "rgba(255,255,255,0.4)", cursor: "pointer", padding: 0 }}>
-                    <ArrowLeft size={16} />
-                  </button>
+                  <button onClick={() => setUploadStep(2)} style={{ background: "none", border: "none", color: "rgba(255,255,255,0.4)", cursor: "pointer", padding: 0 }}><ArrowLeft size={16} /></button>
                   <h3 style={{ fontSize: 16, fontWeight: 500, color: "white" }}>저장 확인</h3>
                   {isAnalyzing && (
                     <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 6 }}>
@@ -765,8 +739,6 @@ const SpotLog = ({ user, couple, onLogout }) => {
                     </div>
                   )}
                 </div>
-
-                {/* 여행 제목 카드 */}
                 <div style={{ padding: "14px 16px", backgroundColor: "rgba(255,107,107,0.08)", border: "1px solid rgba(255,107,107,0.2)", borderRadius: 14, marginBottom: 12 }}>
                   <p style={{ fontSize: 11, color: "rgba(255,107,107,0.5)", marginBottom: 4 }}>여행 이름</p>
                   <p style={{ fontSize: 16, fontWeight: 500, color: "#FF6B6B" }}>{tripTitle.trim() || "우리의 여행"}</p>
@@ -775,17 +747,13 @@ const SpotLog = ({ user, couple, onLogout }) => {
                     {pendingGroups.filter((g) => g.date).map((g) => formatDate(g.date)).sort().slice(-1)[0]}
                   </p>
                 </div>
-
-                {/* 날짜별 요약 */}
                 <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 16, maxHeight: 200, overflowY: "auto" }}>
                   {pendingGroups.map((group, idx) => (
                     <div key={idx} style={{ padding: "10px 14px", backgroundColor: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)", borderRadius: 12, display: "flex", alignItems: "center", gap: 10 }}>
                       <div style={{ width: 22, height: 22, borderRadius: "50%", backgroundColor: "#FF6B6B", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
                         <span style={{ fontSize: 10, color: "white", fontWeight: 600 }}>{idx + 1}</span>
                       </div>
-                      <div style={{ flex: 1, minWidth: 0 }}>
-                        <span style={{ fontSize: 12, color: "rgba(255,255,255,0.5)" }}>{group.date ? formatDate(group.date) : "날짜 미상"}</span>
-                      </div>
+                      <span style={{ flex: 1, fontSize: 12, color: "rgba(255,255,255,0.5)" }}>{group.date ? formatDate(group.date) : "날짜 미상"}</span>
                       {group.analyzing
                         ? <Loader2 size={11} className="animate-spin" style={{ color: "rgba(255,255,255,0.3)" }} />
                         : <span style={{ fontSize: 12, color: "#FF6B6B" }}>{group.regionName || "지역 미상"}</span>
@@ -793,7 +761,6 @@ const SpotLog = ({ user, couple, onLogout }) => {
                     </div>
                   ))}
                 </div>
-
                 <button onClick={handleSave} disabled={isAnalyzing} className="w-full rounded-xl"
                   style={{ padding: 14, backgroundColor: isAnalyzing ? "rgba(255,107,107,0.4)" : "#FF6B6B", color: "white", fontSize: 14, fontWeight: 500, border: "none", cursor: isAnalyzing ? "not-allowed" : "pointer" }}>
                   {isAnalyzing ? "분석 완료 후 저장 가능" : "저장하기"}
@@ -801,7 +768,6 @@ const SpotLog = ({ user, couple, onLogout }) => {
               </>
             )}
 
-            {/* Step 4: GPS 없음 */}
             {uploadStep === 4 && (
               <>
                 <h3 style={{ fontSize: 16, fontWeight: 500, color: "white", marginBottom: 16 }}>위치 정보 없음</h3>
@@ -822,26 +788,14 @@ const SpotLog = ({ user, couple, onLogout }) => {
                       </div>
                     </div>
                     <div style={{ display: "flex", gap: 8 }}>
-                      <button onClick={() => setUploadStep(0)} className="rounded-xl"
-                        style={{ flex: 1, padding: 12, backgroundColor: "rgba(255,255,255,0.06)", color: "rgba(255,255,255,0.6)", fontSize: 13, border: "1px solid rgba(255,255,255,0.1)", cursor: "pointer" }}>
-                        다시 선택
-                      </button>
-                      <button onClick={handleSaveWithSelectedRegion} className="rounded-xl"
-                        style={{ flex: 1, padding: 12, backgroundColor: "#FF6B6B", color: "white", fontSize: 13, fontWeight: 500, border: "none", cursor: "pointer" }}>
-                        {selectedRegion} 저장
-                      </button>
+                      <button onClick={() => setUploadStep(0)} className="rounded-xl" style={{ flex: 1, padding: 12, backgroundColor: "rgba(255,255,255,0.06)", color: "rgba(255,255,255,0.6)", fontSize: 13, border: "1px solid rgba(255,255,255,0.1)", cursor: "pointer" }}>다시 선택</button>
+                      <button onClick={handleSaveWithSelectedRegion} className="rounded-xl" style={{ flex: 1, padding: 12, backgroundColor: "#FF6B6B", color: "white", fontSize: 13, fontWeight: 500, border: "none", cursor: "pointer" }}>{selectedRegion} 저장</button>
                     </div>
                   </div>
                 ) : (
                   <div style={{ display: "flex", gap: 8, marginTop: 16 }}>
-                    <button onClick={() => setUploadStep(0)} className="rounded-xl"
-                      style={{ flex: 1, padding: 12, backgroundColor: "rgba(255,255,255,0.06)", color: "rgba(255,255,255,0.6)", fontSize: 13, border: "1px solid rgba(255,255,255,0.1)", cursor: "pointer" }}>
-                      다시 선택
-                    </button>
-                    <button onClick={closeModal} className="rounded-xl"
-                      style={{ flex: 1, padding: 12, backgroundColor: "transparent", color: "rgba(255,255,255,0.4)", fontSize: 13, border: "1px solid rgba(255,255,255,0.08)", cursor: "pointer" }}>
-                      닫기
-                    </button>
+                    <button onClick={() => setUploadStep(0)} className="rounded-xl" style={{ flex: 1, padding: 12, backgroundColor: "rgba(255,255,255,0.06)", color: "rgba(255,255,255,0.6)", fontSize: 13, border: "1px solid rgba(255,255,255,0.1)", cursor: "pointer" }}>다시 선택</button>
+                    <button onClick={closeModal} className="rounded-xl" style={{ flex: 1, padding: 12, backgroundColor: "transparent", color: "rgba(255,255,255,0.4)", fontSize: 13, border: "1px solid rgba(255,255,255,0.08)", cursor: "pointer" }}>닫기</button>
                   </div>
                 )}
               </>
@@ -850,11 +804,7 @@ const SpotLog = ({ user, couple, onLogout }) => {
         </div>
       )}
 
-      <style>{`
-        * { box-sizing: border-box; }
-        ::-webkit-scrollbar { width: 0; }
-        input::placeholder { color: rgba(255,255,255,0.25); }
-      `}</style>
+      <style>{`* { box-sizing: border-box; } ::-webkit-scrollbar { width: 0; } input::placeholder { color: rgba(255,255,255,0.25); }`}</style>
     </div>
   );
 };
