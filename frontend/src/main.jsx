@@ -1,3 +1,7 @@
+const script = document.createElement("script");
+script.src = `https://dapi.kakao.com/v2/maps/sdk.js?appkey=${import.meta.env.VITE_KAKAO_MAP_KEY}&libraries=services&autoload=false`;
+document.head.appendChild(script);
+
 import { StrictMode, useState, useEffect } from "react";
 import { createRoot } from "react-dom/client";
 import "./App.css";
