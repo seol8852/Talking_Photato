@@ -82,7 +82,17 @@ const AuthPage = ({ onAuthComplete }) => {
       .eq("invite_code", inviteCode.trim().toUpperCase())
       .maybeSingle();
 
-    if (findError || !couple) { setError("유효하지 않은 초대 코드예요."); setLoading(false); return; }
+    if (findError) {
+      setError(`데이터 조회 중 에러가 발생했어요: ${findError.message}`);
+      setLoading(false);
+      return;
+    }
+    
+    if (!couple) {
+      setError("유효하지 않은 초대 코드예요. 코드를 다시 확인해주세요.");
+      setLoading(false);
+      return;
+    }
     if (couple.user_b) { setError("이미 사용된 초대 코드예요."); setLoading(false); return; }
     if (couple.user_a === user.id) { setError("본인이 만든 코드예요. 상대방에게 공유해주세요."); setLoading(false); return; }
 
@@ -95,7 +105,10 @@ const AuthPage = ({ onAuthComplete }) => {
       .single();
 
     setLoading(false);
-    if (updateError) { setError("연결에 실패했어요."); return; }
+    if (updateError) { 
+      setError(`연결 업데이트에 실패했어요: ${updateError.message}`); 
+      return; 
+    }
     const { data: { user: freshUser } } = await supabase.auth.getUser();
     onAuthComplete(freshUser, updated);
   };

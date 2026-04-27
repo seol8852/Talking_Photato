@@ -1,37 +1,16 @@
-📍 SpotLog - Frontend
-SpotLog는 커플 전용 추억 기록 플랫폼으로, 사진 속 위치 데이터를 활용해 우리만의 지도를 정복하고 동선을 시각화하는 서비스입니다.
+# React + Vite
 
-🛠 Tech Stack
-Framework: React (Vite)
+This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
 
-Icons: Lucide-React
+Currently, two official plugins are available:
 
-Maps: Kakao Maps API, React-simple-maps
+- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
+- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
 
-Data Parsing: exifr (EXIF Metadata parsing)
+## React Compiler
 
-📁 Folder Structure
-현재 프론트엔드 폴더 구조는 다음과 같이 구성되어 있습니다.
+The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
 
-src/: 핵심 소스 코드 및 컴포넌트
+## Expanding the ESLint configuration
 
-public/: 정적 리소스 파일
-
-index.html: 메인 엔트리 페이지
-
-vite.config.js: Vite 빌드 및 개발 환경 설정
-
-🚀 Getting Started
-
-1. 의존성 설치
-프로젝트 실행을 위해 필요한 패키지들을 설치합니다.
-
-Bash
-npm install --legacy-peer-deps
-2. 개발 서버 실행
-Vite 개발 서버를 구동합니다.
-
-Bash
-npm run dev
-기본적으로 http://localhost:5173에서 확인할 수 있습니다.
-
+If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.

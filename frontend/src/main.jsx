@@ -1,13 +1,23 @@
-const script = document.createElement("script");
-script.src = `https://dapi.kakao.com/v2/maps/sdk.js?appkey=${import.meta.env.VITE_KAKAO_MAP_KEY}&libraries=services&autoload=false`;
-document.head.appendChild(script);
-
 import { StrictMode, useState, useEffect } from "react";
 import { createRoot } from "react-dom/client";
 import "./App.css";
 import App from "./App.jsx";
 import AuthPage from "./AuthPage.jsx";
 import { supabase } from "./supabaseClient.js";
+
+// ── 카카오 SDK 동적 로드 (env 변수 사용 가능) ──
+const loadKakaoSDK = () => {
+  return new Promise((resolve) => {
+    if (window.kakao) { resolve(); return; }
+    const script = document.createElement("script");
+    script.type = "text/javascript";
+    script.src = `https://dapi.kakao.com/v2/maps/sdk.js?appkey=${import.meta.env.VITE_KAKAO_MAP_KEY}&libraries=services&autoload=false`;
+    script.onload = resolve;
+    document.head.appendChild(script);
+  });
+};
+
+loadKakaoSDK(); // 앱 시작 즉시 로드 시작
 
 const Root = () => {
   const [user, setUser] = useState(null);
