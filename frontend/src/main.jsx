@@ -1,0 +1,91 @@
+import { StrictMode, useState, useEffect } from "react";
+import { createRoot } from "react-dom/client";
+import "./App.css";
+import App from "./App.jsx";
+import AuthPage from "./AuthPage.jsx";
+import { supabase } from "./supabaseClient.js";
+
+const Root = () => {
+  const [user, setUser] = useState(null);
+  const [couple, setCouple] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    // 앱 시작 시 기존 세션 확인
+    const initAuth = async () => {
+      try {
+        const { data: { session }, error } = await supabase.auth.getSession();
+
+        if (error) {
+          console.error("Session check error:", error);
+        }
+
+        if (session?.user) {
+          // 커플 연결 여부 확인
+          const { data: coupleData } = await supabase
+            .from("couples")
+            .select("*")
+            .or(`user_a.eq.${session.user.id},user_b.eq.${session.user.id}`)
+            .maybeSingle();
+
+          setUser(session.user);
+          setCouple(coupleData || null);
+        }
+      } catch (err) {
+        console.error("Supabase 연결 실패 (인터넷/URL 문제):", err);
+        alert("데이터베이스(Supabase)에 연결할 수 없습니다. 인터넷 상태나 Supabase 주소를 확인해주세요!");
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    initAuth();
+
+    // 로그인/로그아웃 상태 변화 감지
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      if (!session) {
+        setUser(null);
+        setCouple(null);
+      }
+    });
+
+    return () => subscription.unsubscribe();
+  }, []);
+
+  const handleAuthComplete = (user, couple) => {
+    setUser(user);
+    setCouple(couple);
+  };
+
+  const handleLogout = async () => {
+    await supabase.auth.signOut();
+    setUser(null);
+    setCouple(null);
+  };
+
+  if (loading) {
+    return (
+      <div style={{ minHeight: "100vh", backgroundColor: "#0A0A0F", display: "flex", alignItems: "center", justifyContent: "center" }}>
+        <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 12 }}>
+          <div style={{ width: 32, height: 32, border: "2px solid rgba(255,107,107,0.3)", borderTopColor: "#FF6B6B", borderRadius: "50%", animation: "spin 0.8s linear infinite" }} />
+          <p style={{ fontSize: 13, color: "rgba(255,255,255,0.3)" }}>SpotLog 연결 중...</p>
+        </div>
+        <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+      </div>
+    );
+  }
+
+  // 로그인 안 됐거나 커플 미연결 → AuthPage
+  if (!user || !couple) {
+    return <AuthPage onAuthComplete={handleAuthComplete} />;
+  }
+
+  // 로그인 + 커플 연결 완료 → 메인 앱
+  return <App user={user} couple={couple} onLogout={handleLogout} />;
+};
+
+createRoot(document.getElementById("root")).render(
+  <StrictMode>
+    <Root />
+  </StrictMode>
+);

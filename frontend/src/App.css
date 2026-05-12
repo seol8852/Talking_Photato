@@ -1,0 +1,11 @@
+@import "tailwindcss";
+
+/* 브라우저가 기본으로 잡는 여백(마진/패딩)을 0으로 초기화합니다. */
+html, body, #root {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  width: 100%;
+  background-color: #0A0A0F; /* SpotLog의 시그니처 다크 배경색 */
+  overflow: hidden; /* 화면 밖으로 내용이 삐져나와도 스크롤바가 생기지 않게 고정합니다. */
+}
