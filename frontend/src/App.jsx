@@ -33,13 +33,14 @@ const buildKeyFromCode = (name, code) => {
 
 const buildKeyFromKakao = (depth1, depth2) => {
   if (!depth2) return null;
-  if (DUPLICATE_NAMES.has(depth2)) {
+  const cleanDepth2 = depth2.replace(/\s+/g, "");
+  if (DUPLICATE_NAMES.has(cleanDepth2)) {
     const cityPrefix = depth1
       .replace("특별시", "").replace("광역시", "").replace("특별자치시", "")
       .replace("특별자치도", "").replace("도", "").trim();
-    return `${cityPrefix} ${depth2}`;
+    return `${cityPrefix} ${cleanDepth2}`;
   }
-  return depth2;
+  return cleanDepth2;
 };
 
 const formatDate = (date) => {
@@ -181,7 +182,7 @@ const waitForKakao = (timeout = 5000) => {
 };
 
 const COMPLEX_KEYWORDS = ["백화점", "아울렛", "쇼핑몰", "몰", "마트", "이마트", "롯데마트", "홈플러스",
-                            "놀이공원", "테마파크", "워터파크", "동물원", "식물원", "수족관",
+                            "랜드", "테마파크", "워터파크", "동물원", "식물원", "수족관",
                             "공항", "터미널", "역", "항구",
                             "대학교", "대학", "캠퍼스",
                             "병원", "의료원",
@@ -873,7 +874,7 @@ const SpotLog = ({ user, couple, onLogout }) => {
   }, [couple.id]);
 
   const getGeoKey = (geo) => buildKeyFromCode(geo.properties.name, geo.properties.code);
-  const visitedNames = visits.map((v) => v.regionName);
+  const visitedNames = visits.map((v) => v.regionName.replace(/\s+/g, ""));
   const getVisitsForTrip = (tripId) => visits.filter((v) => v.tripId === tripId);
   const years = ["전체", ...new Set(trips.map((t) => t.started_at.split(".")[0]))].reverse();
   const filteredTrips = filterYear === "전체" ? trips : trips.filter((t) => t.started_at.startsWith(filterYear));
@@ -1047,7 +1048,7 @@ const SpotLog = ({ user, couple, onLogout }) => {
                   {({ geographies }) =>
                     geographies.map((geo) => {
                       const key = getGeoKey(geo);
-                      const visited = visitedNames.includes(key);
+                      const visited = visitedNames.includes(key.replace(/\s+/g, ""));
                       const selected = selectedRegion === key;
                       return (
                         <Geography key={geo.rsmKey} geography={geo} onClick={() => setSelectedRegion(key)}
@@ -1072,13 +1073,13 @@ const SpotLog = ({ user, couple, onLogout }) => {
               <MapPin size={16} style={{ color: "#FF6B6B", flexShrink: 0 }} />
               <div className="flex-1" style={{ minWidth: 0 }}>
                 <p style={{ fontSize: 10, color: "rgba(255,107,107,0.6)", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 2 }}>
-                  {visitedNames.includes(selectedRegion) ? "Visited ✓" : "Selected Region"}
+                  {visitedNames.includes(selectedRegion.replace(/\s+/g, "")) ? "Visited ✓" : "Selected Region"}
                 </p>
                 <p style={{ fontSize: 15, fontWeight: 500, color: "white", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{selectedRegion}</p>
               </div>
-              {visitedNames.includes(selectedRegion) ? (
+              {visitedNames.includes(selectedRegion.replace(/\s+/g, "")) ? (
                 <button onClick={() => {
-                  const rv = visits.find((v) => v.regionName === selectedRegion);
+                  const rv = visits.find((v) => v.regionName.replace(/\s+/g, "") === selectedRegion.replace(/\s+/g, ""));
                   if (rv?.tripId) { const t = trips.find((t) => t.id === rv.tripId); if (t) setViewTrip(t); }
                 }} className="rounded-xl" style={{ padding: "8px 16px", fontSize: 12, fontWeight: 500, color: "rgba(255,255,255,0.6)", backgroundColor: "rgba(255,255,255,0.08)", border: "1px solid rgba(255,255,255,0.1)", flexShrink: 0, cursor: "pointer" }}>
                   여행 보기
