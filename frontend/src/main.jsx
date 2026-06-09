@@ -5,20 +5,6 @@ import App from "./App.jsx";
 import AuthPage from "./AuthPage.jsx";
 import { supabase } from "./supabaseClient.js";
 
-// ── 카카오 SDK 동적 로드 (env 변수 사용 가능) ──
-const loadKakaoSDK = () => {
-  return new Promise((resolve) => {
-    if (window.kakao) { resolve(); return; }
-    const script = document.createElement("script");
-    script.type = "text/javascript";
-    script.src = `https://dapi.kakao.com/v2/maps/sdk.js?appkey=${import.meta.env.VITE_KAKAO_MAP_KEY}&libraries=services&autoload=false`;
-    script.onload = resolve;
-    document.head.appendChild(script);
-  });
-};
-
-loadKakaoSDK(); // 앱 시작 즉시 로드 시작
-
 const Root = () => {
   const [user, setUser] = useState(null);
   const [couple, setCouple] = useState(null);
@@ -27,20 +13,30 @@ const Root = () => {
   useEffect(() => {
     // 앱 시작 시 기존 세션 확인
     const initAuth = async () => {
-      const { data: { session } } = await supabase.auth.getSession();
+      try {
+        const { data: { session }, error } = await supabase.auth.getSession();
 
-      if (session?.user) {
-        // 커플 연결 여부 확인
-        const { data: coupleData } = await supabase
-          .from("couples")
-          .select("*")
-          .or(`user_a.eq.${session.user.id},user_b.eq.${session.user.id}`)
-          .maybeSingle();
+        if (error) {
+          console.error("Session check error:", error);
+        }
 
-        setUser(session.user);
-        setCouple(coupleData || null);
+        if (session?.user) {
+          // 커플 연결 여부 확인
+          const { data: coupleData } = await supabase
+            .from("couples")
+            .select("*")
+            .or(`user_a.eq.${session.user.id},user_b.eq.${session.user.id}`)
+            .maybeSingle();
+
+          setUser(session.user);
+          setCouple(coupleData || null);
+        }
+      } catch (err) {
+        console.error("Supabase 연결 실패 (인터넷/URL 문제):", err);
+        alert("데이터베이스(Supabase)에 연결할 수 없습니다. 인터넷 상태나 Supabase 주소를 확인해주세요!");
+      } finally {
+        setLoading(false);
       }
-      setLoading(false);
     };
 
     initAuth();
@@ -72,7 +68,7 @@ const Root = () => {
       <div style={{ minHeight: "100vh", backgroundColor: "#0A0A0F", display: "flex", alignItems: "center", justifyContent: "center" }}>
         <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 12 }}>
           <div style={{ width: 32, height: 32, border: "2px solid rgba(255,107,107,0.3)", borderTopColor: "#FF6B6B", borderRadius: "50%", animation: "spin 0.8s linear infinite" }} />
-          <p style={{ fontSize: 13, color: "rgba(255,255,255,0.3)" }}>SpotLog</p>
+          <p style={{ fontSize: 13, color: "rgba(255,255,255,0.3)" }}>SpotLog 연결 중...</p>
         </div>
         <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
       </div>

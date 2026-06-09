@@ -5,7 +5,12 @@
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>SpotLog</title>
-    <!-- 카카오 SDK 스크립트 제거 → main.jsx에서 동적 로드 -->
+
+    <script
+      type="text/javascript"
+      src="https://dapi.kakao.com/v2/maps/sdk.js?appkey=%VITE_KAKAO_MAP_KEY%&libraries=services&autoload=false"
+    ></script>
+
     <style>
       body { background-color: #0A0A0F; margin: 0; }
     </style>

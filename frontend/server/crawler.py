@@ -5,73 +5,72 @@ import hashlib
 
 load_dotenv()
 
-# ✅ 공공데이터포털에서 발급받은 인증키 (인코딩/디코딩 문제 시 디코딩 키 권장)
-SERVICE_KEY = os.getenv("DATA_GO_KR_SERVICE_KEY")
+# ✅ 공공데이터포털에서 발급받은 인증키 (환경 변수 또는 하드코딩)
+SERVICE_KEY = os.getenv("DATA_GO_KR_SERVICE_KEY", "156ea7c8493ca5ba96a4517da54f3ad6faddbef803cb0518dc003055b4285e7e")
 
-# 지상(종관, ASOS) 지점 번호 매핑 [cite: 31, 32]
+# 전국 주요 도시 지점 코드 매핑 (ASOS 지점 번호)
 STATION_MAP = {
-    "서울": "108", "수원": "119", "오산": "232", "광주": "156",
-    "경주": "138", "포항": "138", "부산": "159", "제주": "184", 
-    "인천": "112", "대전": "133"
+    "서울": "108", "인천": "112", "수원": "119", "파주": "146", "춘천": "101", "강릉": "105",
+    "대전": "133", "청주": "131", "서산": "129", "세종": "133", 
+    "광주": "156", "전주": "146", "목포": "165", "여수": "168",
+    "부산": "159", "울산": "152", "대구": "143", "창원": "155", "안동": "136", "포항": "138", "경주": "138",
+    "제주": "184", "서귀포": "189"
 }
 
 def get_weather_data(date_str, location_name):
     """
     기상청 API를 호출하여 특정 날짜와 지역의 날씨 데이터를 가져옵니다.
-    date_str: "YYYY-MM-DD" 형식
-    location_name: "서울시", "경주" 등 지역명
     """ 
-    # 1. 날짜 형식 변환: "2025-08-03" -> "20250803" 
-    api_date = date_str.replace("-", "")
+    if not location_name:
+        return generate_fallback_data(date_str, "알 수 없는 지역")
+
+    # 1. 날짜 형식 변환: "2025-08-03" -> "20250803"
+    api_date = date_str.replace("-", "").replace(".", "")
     
-    # 2. 지역명에서 지점 코드 추출 [cite: 32]
-    clean_name = location_name.replace("시", "").replace("군", "").replace("구", "").strip()
-    station_id = STATION_MAP.get(clean_name, "108")
+    # 2. 지역명에서 지점 코드 추출 (정규화)
+    clean_name = location_name.replace("특별시", "").replace("광역시", "").replace("특별자치시", "").replace("특별자치도", "")
+    clean_name = clean_name.replace("시", "").replace("군", "").replace("구", "").replace("도", "").strip()
     
-    # 3. API 엔드포인트 및 필수 파라미터 설정 [cite: 16, 24]
+    # 두 글자 이상인 경우 앞의 두 글자만 사용하여 매핑 시도
+    if len(clean_name) >= 2 and clean_name[:2] in STATION_MAP:
+        station_id = STATION_MAP[clean_name[:2]]
+    else:
+        station_id = STATION_MAP.get(clean_name, "108") # 기본값 서울
+    
+    # 3. API 엔드포인트 및 필수 파라미터 설정
     url = "http://apis.data.go.kr/1360000/AsosDalyInfoService/getWthrDataList"
     params = {
         'serviceKey': SERVICE_KEY,
-        'numOfRows': '10',
+        'numOfRows': '1',
         'pageNo': '1',
         'dataType': 'JSON',
-        'dataCd': 'ASOS',    # 필수: 자료 코드 
-        'dateCd': 'DAY',     # 필수: 날짜 코드 
-        'startDt': api_date, # 필수: 시작일 
-        'endDt': api_date,   # 필수: 종료일 
-        'stnIds': station_id # 필수: 지점 번호 
+        'dataCd': 'ASOS',
+        'dateCd': 'DAY',
+        'startDt': api_date,
+        'endDt': api_date,
+        'stnIds': station_id
     }
 
     try:
         print(f"📡 [API 호출] {location_name}({station_id}) {date_str}")
-        
-        # 4. API 요청 전송 (타임아웃 10초 설정)
         response = requests.get(url, params=params, timeout=10)
-        
-        # 응답이 정상인지 확인하고 JSON 파싱
-        try:
-            res_data = response.json()
-        except Exception:
-            print("⚠️ [알림] JSON 형식이 아닌 응답을 받았습니다.")
-            return generate_fallback_data(date_str, location_name)
+        res_data = response.json()
 
-        # 5. 응답 코드 확인 [cite: 27, 35]
         header = res_data.get('response', {}).get('header', {})
         result_code = header.get('resultCode')
 
-        if result_code == '00': # 정상 서비스 코드 [cite: 35]
+        if result_code == '00':
             body = res_data['response'].get('body')
             items = body.get('items') if body else None
             item_list = items.get('item') if items else None
 
             if item_list:
                 info = item_list[0]
-                # 평균 기온 및 강수량/운량 데이터 추출 [cite: 27]
                 temp = f"{info['avgTa']}°C"
                 rain = float(info['sumRn']) if info.get('sumRn') else 0
                 cloud = float(info['avgTca']) if info.get('avgTca') else 0
                 
-                # 날씨 상태 결정 로직
+                # 날씨 상태 결정
                 if rain > 1.5: weather_desc = "비/눈 🌧️"
                 elif cloud < 4: weather_desc = "맑음 ☀️"
                 elif cloud < 8: weather_desc = "구름 조금 ⛅"
@@ -80,8 +79,7 @@ def get_weather_data(date_str, location_name):
                 print(f"✅ [API 성공] {temp}, {weather_desc}")
                 return { "status": "success", "temperature": temp, "weather": weather_desc, "location": location_name }
 
-        # 에러 코드 11(필수 파라미터 누락)이나 데이터가 없을 경우 대체 데이터 가동 [cite: 35]
-        print(f"💡 [알림] API 미활성화 혹은 오류({result_code}) - 대체 데이터 생성")
+        print(f"💡 [알림] API 오류({result_code}) - 대체 데이터 생성")
         return generate_fallback_data(date_str, location_name)
 
     except Exception as e:
@@ -91,9 +89,8 @@ def get_weather_data(date_str, location_name):
 def generate_fallback_data(date_str, location_name):
     """API 호출 실패 시 날짜 기반으로 대체 데이터를 생성하는 백업 함수"""
     seed = int(hashlib.md5(date_str.encode()).hexdigest(), 16)
-    month = int(date_str.split("-")[1])
+    month = int(date_str.split("-")[1] if "-" in date_str else date_str[4:6])
     
-    # 월별 기본 온도 설정
     if 3 <= month <= 5: base, desc = 15, "맑음 ☀️"
     elif 6 <= month <= 8: base, desc = 28, "구름 조금 ⛅"
     elif 9 <= month <= 11: base, desc = 18, "맑음 ☀️"

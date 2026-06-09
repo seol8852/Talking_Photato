@@ -1,7 +1,10 @@
-import React, { useState, useEffect, useRef, useCallback } from "react";
-import { Menu, X, Plus, MapPin, Heart, Upload, Loader2, Trash2, ArrowLeft, Check, AlertCircle, LogOut, ChevronRight, Calendar, Pencil, Navigation, Image, ZoomIn } from "lucide-react";
+import React, { useState, useEffect } from "react";
+import { Menu, X, Plus, MapPin, Heart, Upload, Loader2, Trash2, ArrowLeft, Check, AlertCircle, LogOut, ChevronRight, Calendar, Pencil, Image as ImageIcon, Map as MapIcon, MessageCircle, Send } from "lucide-react";
 import { ComposableMap, Geographies, Geography, ZoomableGroup } from "react-simple-maps";
+import { Map, Polyline, CustomOverlayMap } from "react-kakao-maps-sdk";
 import * as exifr from "exifr";
+import imageCompression from "browser-image-compression";
+import { GoogleGenerativeAI } from "@google/generative-ai";
 import { supabase } from "./supabaseClient";
 
 const GEO_URL =
@@ -14,17 +17,10 @@ const SIDO_PREFIX = {
   "35": "전북", "36": "전남", "37": "경북", "38": "경남", "39": "제주",
 };
 
-// ✅ 버그 2 수정: 고성군 등 추가
 const DUPLICATE_NAMES = new Set([
   "중구", "남구", "북구", "동구", "서구",
   "강서구", "강동구", "강남구", "강북구", "수성구", "달서구",
-  "고성군", "연천군", "철원군", "양구군", "인제군", "화천군", "양양군",
 ]);
-
-const COMPLEX_BUILDING_KEYWORDS = [
-  "백화점", "쇼핑몰", "아울렛", "마트", "역사", "터미널", "공항",
-  "병원", "대학교", "대학", "호텔", "리조트", "테마파크",
-];
 
 const buildKeyFromCode = (name, code) => {
   if (!name) return "";
@@ -37,13 +33,14 @@ const buildKeyFromCode = (name, code) => {
 
 const buildKeyFromKakao = (depth1, depth2) => {
   if (!depth2) return null;
-  if (DUPLICATE_NAMES.has(depth2)) {
+  const cleanDepth2 = depth2.replace(/\s+/g, "");
+  if (DUPLICATE_NAMES.has(cleanDepth2)) {
     const cityPrefix = depth1
       .replace("특별시", "").replace("광역시", "").replace("특별자치시", "")
       .replace("특별자치도", "").replace("도", "").trim();
-    return `${cityPrefix} ${depth2}`;
+    return `${cityPrefix} ${cleanDepth2}`;
   }
-  return depth2;
+  return cleanDepth2;
 };
 
 const formatDate = (date) => {
@@ -56,7 +53,8 @@ const getDateKey = (date) => {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 };
 
-const extractPointsFromFiles = async (files) => {
+// ── 업로드 로직 (이미지 압축 + Supabase 스토리지) ──
+const extractPointsFromFiles = async (files, coupleId) => {
   const results = [];
   for (const file of files) {
     try {
@@ -64,17 +62,65 @@ const extractPointsFromFiles = async (files) => {
         gps: true, tiff: true, exif: true,
         pick: ["latitude", "longitude", "DateTimeOriginal"],
       });
-      if (exif?.latitude && exif?.longitude) {
-        results.push({
-          lat: exif.latitude, lng: exif.longitude,
-          time: exif.DateTimeOriginal || null,
-          fileName: file.name,
-        });
+
+      let photo_url = null;
+      let uploadErrorMsg = null;
+
+      if (coupleId) {
+        try {
+          const options = { maxSizeMB: 0.5, maxWidthOrHeight: 1200, useWebWorker: true };
+          const compressed = await imageCompression(file, options);
+          const ext = file.name.split('.').pop() || "jpg";
+          const safeName = `${Date.now()}_${Math.random().toString(36).substring(2,8)}.${ext}`;
+          const filePath = `${coupleId}/${safeName}`;
+
+          const { error } = await supabase.storage.from("trip-photos").upload(filePath, compressed);
+
+          if (error) {
+            uploadErrorMsg = error.message;
+            console.error("스토리지 업로드 에러:", error);
+          } else {
+            const { data: pubData } = supabase.storage.from("trip-photos").getPublicUrl(filePath);
+            photo_url = pubData.publicUrl;
+          }
+        } catch (e) {
+          uploadErrorMsg = e.message;
+          console.warn("업로드 로직 실패:", e);
+        }
       }
+
+      if (uploadErrorMsg) {
+        alert(`사진 업로드에 실패했습니다. Supabase 스토리지에 'trip-photos'라는 이름의 버킷 권한(RLS)이 풀려있는지 확인해 주세요.\n\n상세 에러: ${uploadErrorMsg}`);
+      }
+
+      results.push({
+        lat: exif?.latitude || null,
+        lng: exif?.longitude || null,
+        time: exif?.DateTimeOriginal || null,
+        fileName: file.name,
+        photo_url: photo_url
+      });
+
     } catch (err) {
       console.warn(`EXIF 파싱 실패: ${file.name}`, err);
+      let photo_url = null;
+      if (coupleId) {
+         try {
+            const options = { maxSizeMB: 0.5, maxWidthOrHeight: 1200, useWebWorker: true };
+            const compressed = await imageCompression(file, options);
+            const ext = file.name.split('.').pop() || "jpg";
+            const filePath = `${coupleId}/${Date.now()}_${Math.random().toString(36).substring(2,8)}.${ext}`;
+            const { error } = await supabase.storage.from("trip-photos").upload(filePath, compressed);
+            if (!error) {
+              const { data: pubData } = supabase.storage.from("trip-photos").getPublicUrl(filePath);
+              photo_url = pubData.publicUrl;
+            }
+         } catch(e) {}
+      }
+      results.push({ lat: null, lng: null, time: null, fileName: file.name, photo_url });
     }
   }
+
   results.sort((a, b) => {
     if (!a.time || !b.time) return 0;
     return new Date(a.time) - new Date(b.time);
@@ -98,6 +144,7 @@ const groupPointsByDate = (points) => {
 
 const getRegionFromCoords = (lat, lng) => {
   return new Promise((resolve) => {
+    if (lat == null || lng == null) { resolve(null); return; }
     if (!window.kakao?.maps?.services) { resolve(null); return; }
     const geocoder = new window.kakao.maps.services.Geocoder();
     geocoder.coord2RegionCode(lng, lat, (result, status) => {
@@ -112,6 +159,7 @@ const getRegionFromCoords = (lat, lng) => {
 const getDominantRegionAndPoints = async (points) => {
   const regionMap = {};
   for (const p of points) {
+    if (p.lat == null || p.lng == null) continue;
     const region = await getRegionFromCoords(p.lat, p.lng);
     const key = region || "__unknown__";
     if (!regionMap[key]) regionMap[key] = [];
@@ -123,241 +171,179 @@ const getDominantRegionAndPoints = async (points) => {
   return { regionName: entries[0][0], points: entries[0][1] };
 };
 
-
-// ── Supabase Storage에 사진 업로드 → public URL 배열 반환 ──
-const uploadPhotosToStorage = async (files, coupleId, dateKey) => {
-  const urls = [];
-  for (const file of files) {
-    try {
-      const ext = file.name.split('.').pop().toLowerCase();
-      const path = `${coupleId}/${dateKey}/${Date.now()}_${Math.random().toString(36).slice(2)}.${ext}`;
-      const { error } = await supabase.storage.from('trip-photos').upload(path, file, { upsert: false });
-      if (error) { console.warn('사진 업로드 실패:', error); continue; }
-      const { data: { publicUrl } } = supabase.storage.from('trip-photos').getPublicUrl(path);
-      urls.push(publicUrl);
-    } catch (err) {
-      console.warn('사진 업로드 오류:', err);
-    }
-  }
-  return urls;
-};
-
 const waitForKakao = (timeout = 5000) => {
   return new Promise((resolve) => {
     const start = Date.now();
     const check = setInterval(() => {
       if (Date.now() - start > timeout) { clearInterval(check); resolve(false); return; }
-      if (window.kakao) { clearInterval(check); window.kakao.maps.load(() => resolve(true)); }
+      if (window.kakao && window.kakao.maps) { clearInterval(check); window.kakao.maps.load(() => resolve(true)); }
     }, 100);
   });
 };
 
-// 기존 getSmartLocationLabel 함수 전체를 이걸로 교체
-const getSmartLocationLabel = (lat, lng) => {
+const COMPLEX_KEYWORDS = ["백화점", "아울렛", "쇼핑몰", "몰", "마트", "이마트", "롯데마트", "홈플러스",
+                            "랜드", "테마파크", "워터파크", "동물원", "식물원", "수족관",
+                            "공항", "터미널", "역", "항구",
+                            "대학교", "대학", "캠퍼스",
+                            "병원", "의료원",
+                            "호텔", "리조트", "펜션",
+                            "경기장", "야구장", "축구장", "체육관",
+                            "박물관", "미술관", "과학관", "도서관",
+                            "공원", "광장", "해수욕장", "해변"];
+
+const getPlaceInfo = (lat, lng) => {
   return new Promise((resolve) => {
+    if (lat == null || lng == null) { resolve({ placeName: null, address: null, isNearby: false }); return; }
     if (!window.kakao?.maps?.services) {
-      resolve({ placeName: null, address: `${lat.toFixed(4)}, ${lng.toFixed(4)}`, isLowAccuracy: true });
+      resolve({ placeName: null, address: null, isNearby: false });
       return;
     }
-    const geocoder = new window.kakao.maps.services.Geocoder();
-    geocoder.coord2Address(lng, lat, (addrResult, addrStatus) => {
-      if (addrStatus === window.kakao.maps.services.Status.OK && addrResult[0]) {
-        const road = addrResult[0].road_address;
-        const jibun = addrResult[0].address;
-        // 도로명 주소 우선: "경주시 첨성로" 형태
-        // 없으면 지번: "경주시 황남동" 형태
-        const placeName = road
-          ? `${road.region_2depth_name} ${road.road_name}`
-          : `${jibun.region_2depth_name} ${jibun.region_3depth_name}`;
-        const address = road
-          ? `${road.region_1depth_name} ${road.region_2depth_name}`
-          : `${jibun.region_1depth_name} ${jibun.region_2depth_name}`;
-        resolve({ placeName, address, isLowAccuracy: false });
-      } else {
-        resolve({ placeName: null, address: `${lat.toFixed(4)}, ${lng.toFixed(4)}`, isLowAccuracy: true });
+    const { kakao } = window;
+    const ps = new kakao.maps.services.Places();
+    const geocoder = new kakao.maps.services.Geocoder();
+    const latlng = new kakao.maps.LatLng(lat, lng);
+
+    const getAddress = () => new Promise((res) => {
+      geocoder.coord2Address(lng, lat, (result, status) => {
+        if (status !== kakao.maps.services.Status.OK || !result[0]) { res(null); return; }
+        const r = result[0];
+        const addr = r.road_address
+          ? `${r.road_address.region_2depth_name} ${r.road_address.road_name}`
+          : `${r.address.region_2depth_name} ${r.address.sub_locality || r.address.region_3depth_name}`;
+        res(addr || null);
+      });
+    });
+
+    const searchPlaces = (radius) => new Promise((res) => {
+      ps.keywordSearch(" ", (result, status) => {
+        if (status === kakao.maps.services.Status.OK && result?.length > 0) {
+          const sorted = [...result].sort((a, b) => Number(a.distance) - Number(b.distance));
+          res(sorted[0]);
+        } else {
+          res(null);
+        }
+      }, { location: latlng, radius, sort: kakao.maps.services.SortBy.DISTANCE });
+    });
+
+    Promise.all([searchPlaces(50), getAddress()]).then(async ([place50, address]) => {
+      const bestPlace = place50 || (await searchPlaces(200));
+      if (!bestPlace) {
+        resolve({ placeName: null, address, isNearby: false });
+        return;
       }
+      const isNearby = COMPLEX_KEYWORDS.some((kw) => bestPlace.place_name.includes(kw));
+      resolve({ placeName: bestPlace.place_name, address, isNearby });
     });
   });
 };
 
-// ── 포인트 라벨 (동선 모드 하단) ──
-const PointLabel = ({ point, index, total }) => {
-  const [label, setLabel] = useState(null);
+const PointCard = ({ point, index, total }) => {
+  const [placeInfo, setPlaceInfo] = useState(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    getSmartLocationLabel(point.lat, point.lng).then((result) => {
-      setLabel(result);
+    if (point.lat == null || point.lng == null) {
+      setLoading(false);
+      return;
+    }
+    getPlaceInfo(point.lat, point.lng).then((info) => {
+      setPlaceInfo(info);
       setLoading(false);
     });
   }, [point.lat, point.lng]);
 
   const isFirst = index === 0;
   const isLast = index === total - 1;
-  const tag = isFirst ? "🚀 출발" : isLast ? "🏁 도착" : `📍 ${index + 1}`;
+  const label = isFirst ? "🚀 출발" : isLast ? "🏁 도착" : `📍 ${index + 1}`;
 
   return (
     <div style={{ flexShrink: 0, padding: "10px 14px", backgroundColor: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.07)", borderRadius: 14, minWidth: 140, maxWidth: 200 }}>
-      <p style={{ fontSize: 10, color: "#FF6B6B", marginBottom: 5, fontWeight: 600 }}>{tag}</p>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
+        <span style={{ fontSize: 10, color: "#FF6B6B" }}>{label}</span>
+        {point.time && (
+          <span style={{ fontSize: 10, color: "rgba(255,255,255,0.25)" }}>
+            {new Date(point.time).toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" })}
+          </span>
+        )}
+      </div>
       {loading ? (
         <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
           <Loader2 size={11} className="animate-spin" style={{ color: "rgba(255,255,255,0.3)" }} />
-          <span style={{ fontSize: 11, color: "rgba(255,255,255,0.3)" }}>위치 분석 중...</span>
+          <span style={{ fontSize: 11, color: "rgba(255,255,255,0.3)" }}>조회 중...</span>
         </div>
-      ) : (
+      ) : placeInfo?.placeName ? (
         <>
-          {label?.placeName && <p style={{ fontSize: 13, fontWeight: 500, color: "white", marginBottom: 3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{label.placeName}</p>}
-          {label?.address && <p style={{ fontSize: 11, color: "rgba(255,255,255,0.45)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{label.address}</p>}
-          {label?.isLowAccuracy && <p style={{ fontSize: 10, color: "rgba(255,107,107,0.5)", marginTop: 2 }}>위치 정밀도가 낮아요</p>}
+          <p style={{ fontSize: 12, fontWeight: 500, color: "white", marginBottom: 3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            {placeInfo.placeName}{placeInfo.isNearby ? " 근처" : ""}
+          </p>
+          {placeInfo.address && (
+            <p style={{ fontSize: 10, color: "rgba(255,255,255,0.35)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              {placeInfo.address}
+            </p>
+          )}
         </>
-      )}
-      {point.time && <p style={{ fontSize: 10, color: "rgba(255,255,255,0.2)", marginTop: 4 }}>{new Date(point.time).toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" })}</p>}
-    </div>
-  );
-};
-
-// ── 스팟 상세 (스팟 모드 하단 패널) ──
-const SpotDetail = ({ point, index, total, photoUrls }) => {
-  const [label, setLabel] = useState(null);
-  const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    setLoading(true);
-    setLabel(null);
-    getSmartLocationLabel(point.lat, point.lng).then((result) => {
-      setLabel(result);
-      setLoading(false);
-    });
-  }, [point.lat, point.lng]);
-
-  const tag = index === 0 ? "🚀 출발" : index === total - 1 ? "🏁 도착" : `스팟 ${index + 1}`;
-  return (
-    <div>
-      <p style={{ fontSize: 10, color: "#FF6B6B", marginBottom: 4, fontWeight: 600 }}>{tag}</p>
-      {loading ? (
-        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-          <Loader2 size={12} className="animate-spin" style={{ color: "rgba(255,255,255,0.3)" }} />
-          <span style={{ fontSize: 12, color: "rgba(255,255,255,0.3)" }}>위치 분석 중...</span>
-        </div>
+      ) : placeInfo?.address ? (
+        <p style={{ fontSize: 12, color: "rgba(255,255,255,0.6)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          {placeInfo.address}
+        </p>
+      ) : point.lat != null && point.lng != null ? (
+        <p style={{ fontSize: 11, color: "rgba(255,255,255,0.3)" }}>
+          {point.lat.toFixed(4)}, {point.lng.toFixed(4)}
+        </p>
       ) : (
-        <>
-          {label?.placeName && <p style={{ fontSize: 14, fontWeight: 500, color: "white", marginBottom: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{label.placeName}</p>}
-          {label?.address && <p style={{ fontSize: 12, color: "rgba(255,255,255,0.4)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{label.address}</p>}
-          {!label?.placeName && !label?.address && <p style={{ fontSize: 12, color: "rgba(255,255,255,0.3)" }}>{point.lat.toFixed(5)}, {point.lng.toFixed(5)}</p>}
-        </>
-      )}
-      {point.time && <p style={{ fontSize: 11, color: "rgba(255,255,255,0.25)", marginTop: 3 }}>{new Date(point.time).toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" })}</p>}
-      {photoUrls && photoUrls.length > 0 && (
-        <div style={{ display: "flex", gap: 6, marginTop: 8, overflowX: "auto" }}>
-          {photoUrls.slice(0, 5).map((url, i) => (
-            <img key={i} src={url} alt=""
-              style={{ width: 52, height: 52, borderRadius: 8, objectFit: "cover", flexShrink: 0, border: "1px solid rgba(255,255,255,0.1)" }} />
-          ))}
-        </div>
+        <p style={{ fontSize: 11, color: "rgba(255,255,255,0.3)" }}>위치 정보 없음</p>
       )}
     </div>
   );
 };
 
-// ── 카카오 상세 지도 ──
-// ✅ 버그 1 수정: GPS 없음 조기 return을 훅 아래로 이동
-const KakaoDetailMap = ({ data, onBack, photoUrls }) => {
-  const mapContainer = useRef(null);
-  const mapRef = useRef(null);
-  const overlaysRef = useRef([]);
-  const polylineRef = useRef(null);
+// ── 카카오 상세 지도 (react-kakao-maps-sdk 기반) ──
+const KakaoDetailMap = ({ data, onBack, onUpdateVisit }) => {
   const [isMapReady, setIsMapReady] = useState(false);
-  const [errorMsg, setErrorMsg] = useState(null);
-  const [viewMode, setViewMode] = useState("route");
-  const [activeSpot, setActiveSpot] = useState(null);
-  const hasPoints = data.points && data.points.length > 0;
+  const [selectedPointIndex, setSelectedPointIndex] = useState(null);
 
-  const clearOverlays = useCallback(() => {
-    overlaysRef.current.forEach((o) => o.setMap(null));
-    overlaysRef.current = [];
-    if (polylineRef.current) { polylineRef.current.setMap(null); polylineRef.current = null; }
-  }, []);
+  const [memoText, setMemoText] = useState("");
+  const [isEditingMemo, setIsEditingMemo] = useState(false);
 
-  const renderRouteMode = useCallback(() => {
-    const map = mapRef.current;
-    if (!map || !hasPoints) return;
-    const { kakao } = window;
-    clearOverlays();
-    const linePath = data.points.map((p) => new kakao.maps.LatLng(p.lat, p.lng));
-    const poly = new kakao.maps.Polyline({ path: linePath, strokeWeight: 5, strokeColor: "#FF6B6B", strokeOpacity: 0.85, strokeStyle: "solid" });
-    poly.setMap(map);
-    polylineRef.current = poly;
-    linePath.forEach((pos, idx) => {
-      const isFirst = idx === 0, isLast = idx === linePath.length - 1;
-      const label = isFirst ? "🚀 출발" : isLast ? "🏁 도착" : `${idx + 1}`;
-      const content = `<div style="background:#FF6B6B;color:white;padding:5px 11px;border-radius:20px;font-size:12px;font-weight:600;border:2px solid rgba(255,255,255,0.9);box-shadow:0 3px 10px rgba(0,0,0,0.35);white-space:nowrap;">${label}</div>`;
-      const overlay = new kakao.maps.CustomOverlay({ content, position: pos, yAnchor: 2.6 });
-      overlay.setMap(map);
-      overlaysRef.current.push(overlay);
-    });
-  }, [data.points, hasPoints, clearOverlays]);
-
-  const renderSpotMode = useCallback(() => {
-    const map = mapRef.current;
-    if (!map || !hasPoints) return;
-    const { kakao } = window;
-    clearOverlays();
-    data.points.forEach((p, idx) => {
-      const pos = new kakao.maps.LatLng(p.lat, p.lng);
-      const isFirst = idx === 0, isLast = idx === data.points.length - 1;
-      const dot = isFirst || isLast ? "#FF4444" : "#FF6B6B";
-      const ring = isFirst || isLast ? "3px solid white" : "2px solid rgba(255,255,255,0.8)";
-      const size = isFirst || isLast ? "20px" : "16px";
-      const content = `<div data-idx="${idx}" onclick="window.__spotClick(${idx})" style="width:${size};height:${size};background:${dot};border-radius:50%;border:${ring};box-shadow:0 2px 8px rgba(0,0,0,0.4);cursor:pointer;transition:transform 0.15s;" onmouseover="this.style.transform='scale(1.3)'" onmouseout="this.style.transform='scale(1)'"></div>`;
-      const overlay = new kakao.maps.CustomOverlay({ content, position: pos, yAnchor: 0.5, xAnchor: 0.5 });
-      overlay.setMap(map);
-      overlaysRef.current.push(overlay);
-    });
-  }, [data.points, hasPoints, clearOverlays]);
+  const mapPoints = data.points ? data.points.filter(p => p.lat != null && p.lng != null) : [];
+  const selectedPoint = selectedPointIndex !== null ? mapPoints[selectedPointIndex] : null;
 
   useEffect(() => {
-    window.__spotClick = (idx) => setActiveSpot((prev) => (prev === idx ? null : idx));
-    return () => { delete window.__spotClick; };
-  }, []);
-
-  useEffect(() => {
-    if (!hasPoints) return;
     let attempts = 0;
     const checkKakao = setInterval(() => {
       attempts++;
-      if (attempts > 50) { clearInterval(checkKakao); setErrorMsg("카카오맵을 불러오지 못했어요."); return; }
-      if (!window.kakao) return;
-      clearInterval(checkKakao);
-      window.kakao.maps.load(() => {
-        if (!mapContainer.current) return;
-        try {
-          const { kakao } = window;
-          const center = new kakao.maps.LatLng(data.points[0].lat, data.points[0].lng);
-          const map = new kakao.maps.Map(mapContainer.current, { center, level: 4 });
-          map.relayout();
-          mapRef.current = map;
-          if (data.points.length > 1) {
-            const bounds = new kakao.maps.LatLngBounds();
-            data.points.forEach((p) => bounds.extend(new kakao.maps.LatLng(p.lat, p.lng)));
-            map.setBounds(bounds, 80);
-          }
-          renderRouteMode();
-          setIsMapReady(true);
-        } catch (err) { setErrorMsg("지도를 렌더링하는 중 오류가 발생했어요."); }
-      });
+      if (attempts > 50) { clearInterval(checkKakao); return; }
+      if (window.kakao && window.kakao.maps) {
+        clearInterval(checkKakao);
+        window.kakao.maps.load(() => setIsMapReady(true));
+      }
     }, 100);
     return () => clearInterval(checkKakao);
-  }, [data, hasPoints]);
+  }, []);
 
   useEffect(() => {
-    if (!isMapReady) return;
-    setActiveSpot(null);
-    if (viewMode === "route") renderRouteMode();
-    else renderSpotMode();
-  }, [viewMode, isMapReady]);
+    if (selectedPoint) {
+       setMemoText(selectedPoint.memo || "");
+       setIsEditingMemo(false);
+    }
+  }, [selectedPointIndex]);
 
-  // ✅ 훅이 모두 선언된 후 조기 반환
-  if (!hasPoints) {
+  const handleSaveMemo = () => {
+    if (selectedPointIndex === null) return;
+    const actualPoint = mapPoints[selectedPointIndex];
+
+    // 원본 data.points 배열에서 해당 포인트의 메모를 업데이트
+    const updatedPoints = data.points.map(p =>
+       p === actualPoint ? { ...p, memo: memoText } : p
+    );
+
+    if (onUpdateVisit) {
+        onUpdateVisit(data.id, updatedPoints);
+    }
+    setIsEditingMemo(false);
+  };
+
+  if (!mapPoints || mapPoints.length === 0) {
     return (
       <div style={{ position: "fixed", inset: 0, zIndex: 9999, backgroundColor: "#0A0A0F", display: "flex", flexDirection: "column" }}>
         <div style={{ padding: "16px 20px", display: "flex", alignItems: "center", gap: 12, borderBottom: "1px solid rgba(255,255,255,0.08)", flexShrink: 0 }}>
@@ -372,19 +358,20 @@ const KakaoDetailMap = ({ data, onBack, photoUrls }) => {
           </div>
           <div style={{ textAlign: "center" }}>
             <p style={{ fontSize: 15, fontWeight: 500, color: "white", marginBottom: 8 }}>위치 정보 없음</p>
-            <p style={{ fontSize: 13, color: "rgba(255,255,255,0.35)", lineHeight: 1.7 }}>이 기록은 GPS 정보 없이 저장되어<br />동선을 표시할 수 없어요</p>
-          </div>
-          <div style={{ padding: "12px 20px", backgroundColor: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.07)", borderRadius: 12, textAlign: "center" }}>
-            <p style={{ fontSize: 11, color: "rgba(255,255,255,0.25)", lineHeight: 1.6 }}>다음에 사진을 업로드할 때 카메라 앱에서<br />위치 권한을 허용하면 동선이 자동 생성돼요</p>
+            <p style={{ fontSize: 13, color: "rgba(255,255,255,0.35)", lineHeight: 1.7 }}>이 날의 사진들은 GPS 정보가 없어<br />지도에 동선을 표시할 수 없어요</p>
           </div>
         </div>
       </div>
     );
   }
 
+  const bounds = isMapReady ? new window.kakao.maps.LatLngBounds() : null;
+  if (isMapReady) {
+    mapPoints.forEach((p) => bounds.extend(new window.kakao.maps.LatLng(p.lat, p.lng)));
+  }
+
   return (
     <div style={{ position: "fixed", inset: 0, zIndex: 9999, backgroundColor: "#0A0A0F", display: "flex", flexDirection: "column" }}>
-      {/* 헤더 */}
       <div style={{ padding: "16px 20px", display: "flex", alignItems: "center", gap: 12, borderBottom: "1px solid rgba(255,255,255,0.08)", flexShrink: 0 }}>
         <button onClick={onBack} style={{ width: 36, height: 36, display: "flex", alignItems: "center", justifyContent: "center", borderRadius: 12, backgroundColor: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.1)", color: "white", cursor: "pointer" }}>
           <ArrowLeft size={18} />
@@ -393,114 +380,110 @@ const KakaoDetailMap = ({ data, onBack, photoUrls }) => {
           <p style={{ fontSize: 11, color: "rgba(255,255,255,0.3)", letterSpacing: "0.08em", textTransform: "uppercase", marginBottom: 2 }}>Spot Detail</p>
           <h3 style={{ fontSize: 15, fontWeight: 500, color: "white", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{data.regionName} 동선</h3>
         </div>
-
-        {/* ✅ 버튼 1 수정: 뷰 모드 토글 */}
-        <div style={{ display: "flex", backgroundColor: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 10, overflow: "hidden", flexShrink: 0 }}>
-          <button
-            onClick={() => setViewMode("route")}
-            style={{ display: "flex", alignItems: "center", gap: 5, padding: "7px 14px", border: "none", cursor: "pointer", backgroundColor: viewMode === "route" ? "#FF6B6B" : "transparent", color: viewMode === "route" ? "white" : "rgba(255,255,255,0.4)", fontSize: 12, fontWeight: viewMode === "route" ? 500 : 400, transition: "all 0.2s" }}
-          >
-            <Navigation size={13} /> 동선
-          </button>
-          <button
-            onClick={() => setViewMode("spot")}
-            style={{ display: "flex", alignItems: "center", gap: 5, padding: "7px 14px", border: "none", cursor: "pointer", backgroundColor: viewMode === "spot" ? "#FF6B6B" : "transparent", color: viewMode === "spot" ? "white" : "rgba(255,255,255,0.4)", fontSize: 12, fontWeight: viewMode === "spot" ? 500 : 400, transition: "all 0.2s" }}
-          >
-            <MapPin size={13} /> 스팟
-          </button>
+        <div style={{ padding: "4px 12px", backgroundColor: "rgba(255,107,107,0.12)", border: "1px solid rgba(255,107,107,0.25)", borderRadius: 20, flexShrink: 0 }}>
+          <span style={{ fontSize: 12, color: "#FF6B6B" }}>📍 {mapPoints.length}곳</span>
         </div>
       </div>
 
-      {/* 로딩 / 오류 */}
-      {!isMapReady && !errorMsg && (
-        <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", backgroundColor: "#0A0A0F", zIndex: 10 }}>
-          <Loader2 className="animate-spin" size={36} style={{ color: "#FF6B6B", marginBottom: 12 }} />
-          <p style={{ fontSize: 13, color: "rgba(255,255,255,0.4)" }}>카카오맵 불러오는 중...</p>
-        </div>
-      )}
-      {errorMsg && (
-        <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", backgroundColor: "#0A0A0F", zIndex: 10, padding: "0 32px" }}>
-          <AlertCircle size={36} style={{ color: "#FF6B6B", marginBottom: 12 }} />
-          <p style={{ fontSize: 14, color: "white", textAlign: "center" }}>{errorMsg}</p>
-        </div>
-      )}
+      <div style={{ flex: 1, position: "relative" }}>
+        {!isMapReady && (
+          <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", backgroundColor: "#0A0A0F", zIndex: 10 }}>
+            <Loader2 className="animate-spin" size={36} color="#FF6B6B" />
+          </div>
+        )}
 
-      {/* 지도 */}
-      <div ref={mapContainer} style={{ flex: 1, width: "100%", minHeight: 0 }} />
+        {isMapReady && (
+          <Map
+            center={{ lat: mapPoints[0].lat, lng: mapPoints[0].lng }}
+            style={{ width: "100%", height: "100%" }}
+            level={4}
+            onCreate={(map) => { if (bounds && mapPoints.length > 1) map.setBounds(bounds, 80); }}
+          >
+            <Polyline
+              path={mapPoints.map(p => ({ lat: p.lat, lng: p.lng }))}
+              strokeWeight={5} strokeColor="#FF6B6B" strokeOpacity={0.85} strokeStyle="solid"
+            />
+            {mapPoints.map((pos, idx) => {
+              const isFirst = idx === 0, isLast = idx === mapPoints.length - 1;
+              const label = isFirst ? "🚀 출발" : isLast ? "🏁 도착" : `${idx + 1}`;
+              const isSelected = selectedPointIndex === idx;
+              return (
+                <CustomOverlayMap key={idx} position={{ lat: pos.lat, lng: pos.lng }} yAnchor={1} zIndex={isSelected ? 10 : 1}>
+                  <div
+                    onClick={() => setSelectedPointIndex(isSelected ? null : idx)}
+                    style={{
+                      background: isSelected ? "white" : "#FF6B6B",
+                      color: isSelected ? "#FF6B6B" : "white",
+                      padding: "5px 11px", borderRadius: "20px", fontSize: "12px", fontWeight: "600",
+                      border: "2px solid rgba(255,255,255,0.9)", boxShadow: "0 3px 10px rgba(0,0,0,0.35)",
+                      whiteSpace: "nowrap", cursor: "pointer", transition: "all 0.2s"
+                    }}
+                  >
+                    {label}
+                  </div>
+                </CustomOverlayMap>
+              );
+            })}
+          </Map>
+        )}
 
-      {/* 동선 모드 하단 */}
-      {isMapReady && viewMode === "route" && (
-        <div style={{ padding: "12px 16px", backgroundColor: "#0D0D16", borderTop: "1px solid rgba(255,255,255,0.07)", display: "flex", gap: 10, overflowX: "auto", flexShrink: 0 }}>
-          {data.points.map((p, idx) => (
-            <PointLabel key={idx} point={p} index={idx} total={data.points.length} />
-          ))}
-        </div>
-      )}
+        {/* 사진 팝업(오버레이) UI */}
+        {selectedPoint && (
+          <div style={{ position: "absolute", bottom: 20, left: 20, right: 20, backgroundColor: "rgba(20,20,25,0.95)", backdropFilter: "blur(10px)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 20, padding: 16, zIndex: 100, boxShadow: "0 10px 40px rgba(0,0,0,0.5)", display: "flex", flexDirection: "column", gap: 12 }}>
+            <button onClick={() => setSelectedPointIndex(null)} style={{ position: "absolute", top: 12, right: 12, background: "rgba(255,255,255,0.1)", border: "none", color: "white", borderRadius: "50%", width: 24, height: 24, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer" }}><X size={14}/></button>
 
-      {/* 스팟 모드 하단 */}
-      {isMapReady && viewMode === "spot" && (
-        <div style={{ padding: "14px 20px", backgroundColor: "#0D0D16", borderTop: "1px solid rgba(255,255,255,0.07)", flexShrink: 0, minHeight: 80 }}>
-          {activeSpot === null ? (
-            <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", height: 52, gap: 4 }}>
-              <p style={{ fontSize: 13, color: "rgba(255,255,255,0.35)" }}>마커를 탭하면 해당 스팟 정보를 볼 수 있어요</p>
-              <p style={{ fontSize: 11, color: "rgba(255,255,255,0.2)" }}>총 {data.points.length}개 스팟</p>
+            <div style={{ display: "flex", gap: 12 }}>
+                <div style={{ width: 80, height: 80, borderRadius: 12, backgroundColor: "rgba(255,255,255,0.05)", overflow: "hidden", flexShrink: 0 }}>
+                  {selectedPoint.photo_url ? (
+                    <img src={selectedPoint.photo_url} alt="spot" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                  ) : (
+                    <div style={{ width: "100%", height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: "rgba(255,255,255,0.2)" }}><ImageIcon size={24}/></div>
+                  )}
+                </div>
+                <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", justifyContent: "center", paddingRight: 24 }}>
+                  <p style={{ fontSize: 13, fontWeight: 500, color: "white", marginBottom: 4 }}>
+                     {selectedPoint.time ? new Date(selectedPoint.time).toLocaleTimeString("ko-KR", { hour: '2-digit', minute: '2-digit' }) : "시간 미상"}의 기록
+                  </p>
+                  <p style={{ fontSize: 11, color: "rgba(255,255,255,0.4)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {selectedPoint.lat.toFixed(4)}, {selectedPoint.lng.toFixed(4)}
+                  </p>
+                </div>
             </div>
-          ) : (
-            <div style={{ display: "flex", gap: 12, alignItems: "flex-start" }}>
-              <div style={{ width: 36, height: 36, borderRadius: "50%", backgroundColor: "#FF6B6B", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
-                <span style={{ fontSize: 13, color: "white", fontWeight: 600 }}>
-                  {activeSpot === 0 ? "S" : activeSpot === data.points.length - 1 ? "E" : activeSpot + 1}
-                </span>
-              </div>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <SpotDetail point={data.points[activeSpot]} index={activeSpot} total={data.points.length} photoUrls={photoUrls} />
-              </div>
-              <button onClick={() => setActiveSpot(null)} style={{ background: "none", border: "none", color: "rgba(255,255,255,0.3)", cursor: "pointer", padding: 4, flexShrink: 0 }}>
-                <X size={16} />
-              </button>
+
+            {/* 메모 입력 영역 */}
+            <div style={{ backgroundColor: "rgba(255,255,255,0.03)", borderRadius: 12, padding: "10px 12px", border: "1px solid rgba(255,255,255,0.05)" }}>
+                {isEditingMemo ? (
+                    <div style={{ display: "flex", gap: 8 }}>
+                        <input
+                            type="text"
+                            value={memoText}
+                            onChange={(e) => setMemoText(e.target.value)}
+                            placeholder="이곳에서의 추억을 남겨보세요..."
+                            autoFocus
+                            style={{ flex: 1, background: "transparent", border: "none", outline: "none", color: "white", fontSize: 12 }}
+                            onKeyDown={(e) => e.key === 'Enter' && handleSaveMemo()}
+                        />
+                        <button onClick={handleSaveMemo} style={{ background: "#FF6B6B", border: "none", borderRadius: 8, color: "white", padding: "4px 10px", fontSize: 11, cursor: "pointer", fontWeight: 500 }}>저장</button>
+                    </div>
+                ) : (
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8 }}>
+                        <p style={{ fontSize: 12, color: selectedPoint.memo ? "rgba(255,255,255,0.9)" : "rgba(255,255,255,0.3)", lineHeight: 1.5, wordBreak: "break-word", margin: 0 }}>
+                            {selectedPoint.memo || "이곳에서의 추억을 남겨보세요..."}
+                        </p>
+                        <button onClick={() => setIsEditingMemo(true)} style={{ background: "transparent", border: "none", color: "rgba(255,255,255,0.4)", cursor: "pointer", padding: 2, display: "flex", flexShrink: 0 }}>
+                            <Pencil size={12} />
+                        </button>
+                    </div>
+                )}
             </div>
-          )}
-        </div>
-      )}
-    </div>
-  );
-};
-
-
-// ── 사진 뷰어 (풀스크린) ──
-const PhotoViewer = ({ photos, initialIndex, onClose }) => {
-  const [current, setCurrent] = React.useState(initialIndex);
-  return (
-    <div style={{ position: "fixed", inset: 0, zIndex: 99999, backgroundColor: "rgba(0,0,0,0.95)", display: "flex", flexDirection: "column" }}>
-      <div style={{ padding: "16px 20px", display: "flex", alignItems: "center", justifyContent: "space-between", flexShrink: 0 }}>
-        <span style={{ fontSize: 13, color: "rgba(255,255,255,0.4)" }}>{current + 1} / {photos.length}</span>
-        <button onClick={onClose} style={{ background: "none", border: "none", color: "rgba(255,255,255,0.6)", cursor: "pointer" }}>
-          <X size={22} />
-        </button>
-      </div>
-      <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", position: "relative", overflow: "hidden" }}>
-        <img src={photos[current]} alt="" style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain" }} />
-        {photos.length > 1 && (
-          <>
-            <button
-              onClick={() => setCurrent((p) => (p - 1 + photos.length) % photos.length)}
-              style={{ position: "absolute", left: 16, top: "50%", transform: "translateY(-50%)", width: 40, height: 40, borderRadius: "50%", backgroundColor: "rgba(255,255,255,0.1)", border: "1px solid rgba(255,255,255,0.2)", color: "white", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}
-            >‹</button>
-            <button
-              onClick={() => setCurrent((p) => (p + 1) % photos.length)}
-              style={{ position: "absolute", right: 16, top: "50%", transform: "translateY(-50%)", width: 40, height: 40, borderRadius: "50%", backgroundColor: "rgba(255,255,255,0.1)", border: "1px solid rgba(255,255,255,0.2)", color: "white", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}
-            >›</button>
-          </>
+          </div>
         )}
       </div>
-      {/* 하단 썸네일 스트립 */}
-      {photos.length > 1 && (
-        <div style={{ padding: "12px 16px", display: "flex", gap: 6, overflowX: "auto", flexShrink: 0, justifyContent: "center" }}>
-          {photos.map((url, i) => (
-            <div key={i} onClick={() => setCurrent(i)}
-              style={{ width: 48, height: 48, borderRadius: 8, overflow: "hidden", flexShrink: 0, cursor: "pointer", border: i === current ? "2px solid #FF6B6B" : "2px solid transparent", transition: "border 0.15s" }}>
-              <img src={url} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
-            </div>
+
+      {isMapReady && (
+        <div style={{ padding: "12px 16px", backgroundColor: "#0D0D16", borderTop: "1px solid rgba(255,255,255,0.07)", display: "flex", gap: 8, overflowX: "auto", flexShrink: 0 }}>
+          {mapPoints.map((p, idx) => (
+            <PointCard key={idx} point={p} index={idx} total={mapPoints.length} />
           ))}
         </div>
       )}
@@ -508,92 +491,351 @@ const PhotoViewer = ({ photos, initialIndex, onClose }) => {
   );
 };
 
-// ── 날짜별 사진 갤러리 ──
-const PhotoGallery = ({ photoUrls }) => {
-  const [viewerOpen, setViewerOpen] = React.useState(false);
-  const [viewerIdx, setViewerIdx] = React.useState(0);
-  if (!photoUrls || photoUrls.length === 0) return null;
+// ── 날씨 정보 컴포넌트 (백엔드 API 연동) ──
+const WeatherBadge = ({ date, location }) => {
+  const [weather, setWeather] = useState(null);
+
+  useEffect(() => {
+    const fetchWeather = async () => {
+      try {
+        const response = await fetch("http://localhost:8000/get-weather", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ date, location }),
+        });
+        const data = await response.json();
+        if (data.status === "success") {
+          setWeather(data);
+        }
+      } catch (err) {
+        console.warn("날씨 API 호출 실패:", err);
+      }
+    };
+    if (date && location) fetchWeather();
+  }, [date, location]);
+
+  if (!weather) return null;
+
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 5, padding: "3px 10px", backgroundColor: "rgba(255,255,255,0.06)", borderRadius: 10, border: "1px solid rgba(255,255,255,0.12)", marginLeft: 6 }}>
+      <span style={{ fontSize: 11, color: "rgba(255,255,255,0.8)", fontWeight: 500 }}>{weather.temperature}</span>
+      <span style={{ fontSize: 11 }}>{weather.weather.includes(" ") ? weather.weather.split(" ")[1] : weather.weather}</span>
+    </div>
+  );
+};
+
+// ── 여행 상세 화면 (핀터레스트 갤러리 피드 추가) ──
+const TripDetailView = ({ trip, visits, onBack, onViewDetail, onDeleteVisit, onDeleteTrip }) => {
+  const [viewMode, setViewMode] = useState("list");
+
+  const photos = visits.flatMap(v => v.points.map(p => ({ ...p, visitDate: v.date, regionName: v.regionName }))).filter(p => p.photo_url);
+
+  return (
+    <div style={{ position: "fixed", inset: 0, zIndex: 5000, backgroundColor: "#0A0A0F", display: "flex", flexDirection: "column" }}>
+      <div style={{ padding: "16px 20px", display: "flex", alignItems: "center", gap: 12, borderBottom: "1px solid rgba(255,255,255,0.08)", flexShrink: 0 }}>
+        <button onClick={onBack} style={{ width: 36, height: 36, display: "flex", alignItems: "center", justifyContent: "center", borderRadius: 12, backgroundColor: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.1)", color: "white", cursor: "pointer" }}>
+          <ArrowLeft size={18} />
+        </button>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <p style={{ fontSize: 11, color: "rgba(255,255,255,0.3)", letterSpacing: "0.08em", textTransform: "uppercase", marginBottom: 2 }}>Trip</p>
+          <h3 style={{ fontSize: 15, fontWeight: 500, color: "white", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{trip.title}</h3>
+        </div>
+        <button onClick={() => onDeleteTrip(trip.id)} style={{ padding: "6px 10px", borderRadius: 10, backgroundColor: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.08)", color: "rgba(255,255,255,0.3)", cursor: "pointer", display: "flex", alignItems: "center", gap: 4, fontSize: 11 }}>
+          <Trash2 size={13} /> 삭제
+        </button>
+      </div>
+
+      <div style={{ padding: "14px 20px", borderBottom: "1px solid rgba(255,255,255,0.06)", display: "flex", alignItems: "center", gap: 8 }}>
+        <Calendar size={14} style={{ color: "rgba(255,255,255,0.3)" }} />
+        <span style={{ fontSize: 13, color: "rgba(255,255,255,0.5)" }}>{trip.started_at} ~ {trip.ended_at}</span>
+        <span style={{ marginLeft: "auto", fontSize: 11, color: "rgba(255,255,255,0.25)" }}>총 {visits.length}일</span>
+      </div>
+
+      <div style={{ display: "flex", padding: "16px 20px 0", gap: 10 }}>
+        <button onClick={() => setViewMode("list")} style={{ flex: 1, padding: "10px", borderRadius: 12, display: "flex", alignItems: "center", justifyContent: "center", gap: 6, fontSize: 13, fontWeight: 500, backgroundColor: viewMode === "list" ? "rgba(255,107,107,0.15)" : "rgba(255,255,255,0.03)", color: viewMode === "list" ? "#FF6B6B" : "rgba(255,255,255,0.4)", border: `1px solid ${viewMode === "list" ? "rgba(255,107,107,0.3)" : "rgba(255,255,255,0.08)"}`, transition: "all 0.2s", cursor: "pointer" }}>
+          <MapIcon size={16} /> 일정 뷰
+        </button>
+        <button onClick={() => setViewMode("gallery")} style={{ flex: 1, padding: "10px", borderRadius: 12, display: "flex", alignItems: "center", justifyContent: "center", gap: 6, fontSize: 13, fontWeight: 500, backgroundColor: viewMode === "gallery" ? "rgba(255,107,107,0.15)" : "rgba(255,255,255,0.03)", color: viewMode === "gallery" ? "#FF6B6B" : "rgba(255,255,255,0.4)", border: `1px solid ${viewMode === "gallery" ? "rgba(255,107,107,0.3)" : "rgba(255,255,255,0.08)"}`, transition: "all 0.2s", cursor: "pointer" }}>
+          <ImageIcon size={16} /> 갤러리 피드
+        </button>
+      </div>
+
+      <div style={{ flex: 1, overflowY: "auto", padding: "16px 20px" }}>
+        {viewMode === "list" ? (
+          visits.length === 0 ? (
+            <p style={{ textAlign: "center", fontSize: 12, color: "rgba(255,255,255,0.2)", padding: "40px 0", fontStyle: "italic" }}>기록이 없어요</p>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              {visits.map((visit, idx) => (
+                <div key={visit.id} style={{ backgroundColor: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)", borderRadius: 16, overflow: "hidden" }}>
+                  <div style={{ padding: "12px 16px", borderBottom: "1px solid rgba(255,255,255,0.05)", display: "flex", alignItems: "center", gap: 10 }}>
+                    <div style={{ width: 24, height: 24, borderRadius: "50%", backgroundColor: "rgba(255,107,107,0.15)", border: "1px solid rgba(255,107,107,0.3)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                      <span style={{ fontSize: 10, color: "#FF6B6B", fontWeight: 600 }}>Day {idx + 1}</span>
+                    </div>
+                    <span style={{ fontSize: 13, color: "rgba(255,255,255,0.6)" }}>{visit.date}</span>
+                    <WeatherBadge date={visit.date} location={visit.regionName} />
+                    <span style={{ marginLeft: "auto", fontSize: 11, color: "rgba(255,107,107,0.6)" }}>📍 {visit.regionName}</span>
+                  </div>
+                  <div style={{ padding: "12px 16px", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                    <span style={{ fontSize: 12, color: "rgba(255,255,255,0.3)" }}>{visit.points.length > 0 ? `${visit.points.length}곳 방문` : "위치 정보 없음"}</span>
+                    <div style={{ display: "flex", gap: 8 }}>
+                      <button onClick={() => onDeleteVisit(visit.id)} style={{ padding: "6px 10px", borderRadius: 8, backgroundColor: "transparent", border: "1px solid rgba(255,255,255,0.08)", color: "rgba(255,255,255,0.25)", cursor: "pointer", display: "flex", alignItems: "center" }}>
+                        <Trash2 size={12} />
+                      </button>
+                      <button onClick={() => onViewDetail(visit)} style={{ padding: "6px 14px", borderRadius: 8, backgroundColor: "rgba(255,107,107,0.1)", border: "1px solid rgba(255,107,107,0.2)", color: "#FF6B6B", cursor: "pointer", fontSize: 12, display: "flex", alignItems: "center", gap: 4 }}>
+                        동선 보기 <ChevronRight size={13} />
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )
+        ) : (
+          photos.length === 0 ? (
+            <div style={{ textAlign: "center", padding: "60px 0", color: "rgba(255,255,255,0.3)" }}>
+              <ImageIcon size={32} style={{ margin: "0 auto 12px", opacity: 0.5 }} />
+              <p style={{ fontSize: 13 }}>업로드된 사진이 없어요</p>
+            </div>
+          ) : (
+            <div style={{ columnCount: 2, columnGap: "12px" }}>
+              {photos.map((point, idx) => (
+                <div key={idx} style={{ breakInside: "avoid", marginBottom: "12px", position: "relative", borderRadius: 16, overflow: "hidden", backgroundColor: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.08)" }}>
+                  <img src={point.photo_url} alt="memory" style={{ width: "100%", display: "block" }} loading="lazy" />
+                  <div style={{ position: "absolute", bottom: 0, left: 0, right: 0, padding: "24px 12px 12px", background: "linear-gradient(to top, rgba(0,0,0,0.9), transparent)", pointerEvents: "none" }}>
+                    <p style={{ color: "white", fontSize: 12, fontWeight: 500, marginBottom: 2 }}>{point.regionName || "위치 정보 없음"}</p>
+                    <p style={{ color: "rgba(255,255,255,0.5)", fontSize: 10 }}>{point.time ? new Date(point.time).toLocaleDateString() : ""} {point.time ? new Date(point.time).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}) : ""}</p>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )
+        )}
+      </div>
+    </div>
+  );
+};
+
+// ── AI 챗봇 컴포넌트 (Gemini API 연동) ──
+const ChatBot = () => {
+  const [isOpen, setIsOpen] = useState(false);
+  const [messages, setMessages] = useState([
+    { role: "model", content: "안녕하세요! 커플들을 위한 SpotLog AI 어시스턴트입니다 💖\n어떤 데이트 장소를 찾으시나요? 날씨나 코스 추천 등 무엇이든 편하게 물어보세요!" }
+  ]);
+  const [input, setInput] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [contextStatus, setContextStatus] = useState("wait"); // "wait", "success", "error"
+
+  // 사용자의 현재 위치 및 날씨 정보 저장
+  const [contextInfo, setContextInfo] = useState({ location: null, weather: null });
+
+  useEffect(() => {
+    // 챗봇 열릴 때 한 번만 위치와 날씨 정보를 가져옵니다.
+    const fetchContextData = async () => {
+      const applyFallback = async () => {
+        try {
+          const fallbackLocation = "서울 강남구";
+          const today = new Date();
+          const dateStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
+          const response = await fetch("http://localhost:8000/get-weather", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ date: dateStr, location: fallbackLocation }),
+          });
+          const data = await response.json();
+          if (data.status === "success") {
+            setContextInfo({
+              location: fallbackLocation,
+              weather: `${data.temperature}, ${data.weather} (테스트 모드)`
+            });
+            setContextStatus("success");
+          } else {
+            setContextStatus("error");
+          }
+        } catch (error) {
+          setContextStatus("error");
+        }
+      };
+
+      if (isOpen && !contextInfo.location) {
+        setContextStatus("wait");
+        if (navigator.geolocation) {
+          // 카카오맵 SDK 로딩 보장
+          await waitForKakao(3000);
+
+          navigator.geolocation.getCurrentPosition(
+            async (position) => {
+              const { latitude, longitude } = position.coords;
+              try {
+                // 1. 역지오코딩으로 지역명 획득
+                const regionName = await getRegionFromCoords(latitude, longitude);
+
+                if (regionName) {
+                  // 2. 현재 날짜 구하기
+                  const today = new Date();
+                  const dateStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
+
+                  // 3. 날씨 API 호출
+                  const response = await fetch("http://localhost:8000/get-weather", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ date: dateStr, location: regionName }),
+                  });
+                  const data = await response.json();
+
+                  if (data.status === "success") {
+                    setContextInfo({
+                      location: regionName,
+                      weather: `${data.temperature}, ${data.weather}`
+                    });
+                    setContextStatus("success");
+                  } else {
+                    await applyFallback();
+                  }
+                } else {
+                    await applyFallback();
+                }
+              } catch (error) {
+                console.error("Context Data Fetch Error:", error);
+                await applyFallback();
+              }
+            },
+            async (error) => {
+              console.warn("Geolocation Error or Timeout:", error);
+              // 권한 거부 또는 타임아웃 시 강제 Fallback 적용
+              await applyFallback();
+            },
+            { timeout: 15000, maximumAge: 0 } // 노트북을 위해 타임아웃을 15초로 연장
+          );
+        } else {
+          await applyFallback();
+        }
+      }
+    };
+
+    fetchContextData();
+  }, [isOpen]);
+
+  const sendMessage = async () => {
+    if (!input.trim() || loading) return;
+    const userMessage = input.trim();
+    setInput("");
+    setMessages((prev) => [...prev, { role: "user", content: userMessage }]);
+    setLoading(true);
+
+    const MAX_RETRIES = 5;
+    const INITIAL_DELAY_MS = 1000; // 1초
+
+    try {
+      const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
+      if (!apiKey) {
+        setMessages((prev) => [...prev, { role: "model", content: "⚠️ Gemini API 키가 설정되지 않았습니다. .env 파일을 확인해주세요." }]);
+        setLoading(false);
+        return;
+      }
+
+      const genAI = new GoogleGenerativeAI(apiKey);
+      const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
+
+      // Context-Aware 프롬프트 구성
+      let contextString = "";
+      if (contextInfo.location && contextInfo.weather && contextStatus === "success") {
+          contextString = `\n\n[필독: 사용자 현재 상황]\n- 현재 위치: ${contextInfo.location}\n- 실시간 날씨: ${contextInfo.weather}\n* 중요: 사용자가 날씨나 위치를 명시하지 않더라도, 위의 실시간 날씨와 위치 정보를 적극적으로 반영하여 이 지역의 날씨에 완벽하게 어울리는 데이트 코스를 추천해 주세요.\n`;
+      }
+
+      const prompt = `당신은 한국의 커플들을 위해 로맨틱하고 센스있게 데이트 장소나 코스를 추천해주고, 날씨나 꿀팁을 친절하게 알려주는 AI 어시스턴트입니다. 항상 다정하고 친근한 말투(해요체)를 사용하고, 너무 길지 않게 핵심만 답변해주세요.${contextString}\n사용자 질문: ${userMessage}`;
+
+      let delay = INITIAL_DELAY_MS;
+      for (let i = 0; i < MAX_RETRIES; i++) {
+        try {
+          const result = await model.generateContent(prompt);
+          const response = await result.response;
+          const text = response.text();
+          setMessages((prev) => [...prev, { role: "model", content: text }]);
+          break; // 성공하면 루프 종료
+        } catch (err) {
+          console.error(`Gemini API Error (Attempt ${i + 1}/${MAX_RETRIES}):`, err);
+          if (err.message && err.message.includes("429") && i < MAX_RETRIES - 1) {
+            setMessages((prev) => [...prev, { role: "model", content: `API 요청이 너무 많아요. 잠시 후 다시 시도합니다... (재시도 ${i + 1}/${MAX_RETRIES})` }]);
+            await new Promise(resolve => setTimeout(resolve, delay));
+            delay *= 2; // 딜레이를 두 배로 늘림
+          } else {
+            setMessages((prev) => [...prev, { role: "model", content: `앗, API 호출에 오류가 발생했어요: ${err.message}` }]);
+            break; // 재시도 불가능한 오류 또는 마지막 재시도 실패
+          }
+        }
+      }
+    } catch (err) {
+      console.error("Gemini API Initialization Error:", err);
+      setMessages((prev) => [...prev, { role: "model", content: `챗봇 초기화 중 오류가 발생했어요: ${err.message}` }]);
+    }
+    setLoading(false);
+  };
+
   return (
     <>
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 4, marginTop: 10 }}>
-        {photoUrls.slice(0, 6).map((url, i) => (
-          <div key={i} onClick={() => { setViewerIdx(i); setViewerOpen(true); }}
-            style={{ aspectRatio: "1", borderRadius: 8, overflow: "hidden", cursor: "pointer", position: "relative", backgroundColor: "rgba(255,255,255,0.04)" }}>
-            <img src={url} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
-            {/* 6장 이상이면 마지막 셀에 +N 배지 */}
-            {i === 5 && photoUrls.length > 6 && (
-              <div style={{ position: "absolute", inset: 0, backgroundColor: "rgba(0,0,0,0.6)", display: "flex", alignItems: "center", justifyContent: "center" }}>
-                <span style={{ fontSize: 16, fontWeight: 500, color: "white" }}>+{photoUrls.length - 6}</span>
+      <button
+        onClick={() => setIsOpen(!isOpen)}
+        style={{ position: "fixed", bottom: 24, right: 24, zIndex: 9000, width: 56, height: 56, borderRadius: "50%", backgroundColor: "#FF6B6B", color: "white", border: "none", boxShadow: "0 4px 16px rgba(255,107,107,0.4)", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", transition: "all 0.2s", transform: isOpen ? "scale(0.9)" : "scale(1)" }}
+      >
+        {isOpen ? <X size={24} /> : <MessageCircle size={26} />}
+      </button>
+
+      {isOpen && (
+        <div style={{ position: "fixed", bottom: 96, right: 24, width: 340, height: 520, backgroundColor: "#16161F", borderRadius: 24, border: "1px solid rgba(255,107,107,0.2)", boxShadow: "0 10px 40px rgba(0,0,0,0.5)", zIndex: 9000, display: "flex", flexDirection: "column", overflow: "hidden", animation: "slideUp 0.3s ease-out" }}>
+          <style>{`@keyframes slideUp { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; transform: translateY(0); } }`}</style>
+
+          <div style={{ padding: "16px 20px", backgroundColor: "rgba(255,107,107,0.1)", borderBottom: "1px solid rgba(255,107,107,0.15)", display: "flex", alignItems: "center", gap: 10 }}>
+            <div style={{ width: 32, height: 32, borderRadius: "50%", backgroundColor: "#FF6B6B", display: "flex", alignItems: "center", justifyContent: "center" }}>
+              <Heart size={16} fill="white" color="white" />
+            </div>
+            <div>
+              <span style={{ fontSize: 15, fontWeight: 600, color: "white", display: "block", marginBottom: 2 }}>SpotLog AI</span>
+              <span style={{ fontSize: 11, color: "rgba(255,255,255,0.5)" }}>우리만의 데이트 어시스턴트</span>
+            </div>
+          </div>
+
+          <div style={{ flex: 1, padding: 16, overflowY: "auto", display: "flex", flexDirection: "column", gap: 14 }}>
+            {messages.map((m, i) => (
+              <div key={i} style={{ alignSelf: m.role === "user" ? "flex-end" : "flex-start", backgroundColor: m.role === "user" ? "#FF6B6B" : "rgba(255,255,255,0.06)", color: m.role === "user" ? "white" : "rgba(255,255,255,0.9)", padding: "12px 16px", borderRadius: m.role === "user" ? "20px 20px 4px 20px" : "20px 20px 20px 4px", maxWidth: "85%", fontSize: 13, lineHeight: 1.6, wordBreak: "break-word", whiteSpace: "pre-wrap", border: m.role === "user" ? "none" : "1px solid rgba(255,255,255,0.08)" }}>
+                {m.content}
+              </div>
+            ))}
+            {loading && (
+              <div style={{ alignSelf: "flex-start", padding: "12px 16px", backgroundColor: "rgba(255,255,255,0.06)", borderRadius: "20px 20px 20px 4px", border: "1px solid rgba(255,255,255,0.08)" }}>
+                <Loader2 size={16} className="animate-spin" style={{ color: "#FF6B6B" }} />
               </div>
             )}
           </div>
-        ))}
-      </div>
-      {viewerOpen && <PhotoViewer photos={photoUrls} initialIndex={viewerIdx} onClose={() => setViewerOpen(false)} />}
+
+          {/* Context-Aware 상태 표시창 추가 */}
+          <div style={{ padding: "8px 16px", backgroundColor: "rgba(0,0,0,0.3)", borderTop: "1px solid rgba(255,255,255,0.06)", display: "flex", alignItems: "center", gap: 6 }}>
+             <MapPin size={12} style={{ color: contextStatus === "success" ? "#FF6B6B" : "rgba(255,255,255,0.3)" }} />
+             <span style={{ fontSize: 11, color: contextStatus === "success" ? "rgba(255,255,255,0.7)" : "rgba(255,255,255,0.3)" }}>
+               {contextStatus === "success" ? `${contextInfo.location} · ${contextInfo.weather}` : contextStatus === "error" ? "위치 정보를 가져오는 데 실패했습니다" : "현재 위치와 날씨 파악 중..."}
+             </span>
+          </div>
+
+          <div style={{ padding: "12px 16px", borderTop: "1px solid rgba(255,255,255,0.06)", backgroundColor: "rgba(0,0,0,0.2)", display: "flex", gap: 8, alignItems: "center" }}>
+            <input
+              type="text"
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && sendMessage()}
+              placeholder="예: 실내 코스 추천해줘!"
+              style={{ flex: 1, padding: "12px 16px", borderRadius: 20, backgroundColor: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.1)", color: "white", fontSize: 13, outline: "none", transition: "border-color 0.2s" }}
+              onFocus={(e) => (e.target.style.borderColor = "rgba(255,107,107,0.4)")}
+              onBlur={(e) => (e.target.style.borderColor = "rgba(255,255,255,0.1)")}
+            />
+            <button onClick={sendMessage} style={{ width: 44, height: 44, borderRadius: "50%", backgroundColor: input.trim() ? "#FF6B6B" : "rgba(255,255,255,0.1)", border: "none", color: "white", display: "flex", alignItems: "center", justifyContent: "center", cursor: input.trim() ? "pointer" : "default", flexShrink: 0, transition: "background-color 0.2s" }}>
+              <Send size={18} style={{ transform: "translateX(1px) translateY(1px)" }} />
+            </button>
+          </div>
+        </div>
+      )}
     </>
   );
 };
-
-// ── 여행 상세 화면 ──
-const TripDetailView = ({ trip, visits, onBack, onViewDetail, onDeleteVisit, onDeleteTrip, photoUrlsMap }) => (
-  <div style={{ position: "fixed", inset: 0, zIndex: 5000, backgroundColor: "#0A0A0F", display: "flex", flexDirection: "column" }}>
-    <div style={{ padding: "16px 20px", display: "flex", alignItems: "center", gap: 12, borderBottom: "1px solid rgba(255,255,255,0.08)", flexShrink: 0 }}>
-      <button onClick={onBack} style={{ width: 36, height: 36, display: "flex", alignItems: "center", justifyContent: "center", borderRadius: 12, backgroundColor: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.1)", color: "white", cursor: "pointer" }}>
-        <ArrowLeft size={18} />
-      </button>
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <p style={{ fontSize: 11, color: "rgba(255,255,255,0.3)", letterSpacing: "0.08em", textTransform: "uppercase", marginBottom: 2 }}>Trip</p>
-        <h3 style={{ fontSize: 15, fontWeight: 500, color: "white", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{trip.title}</h3>
-      </div>
-      <button onClick={() => onDeleteTrip(trip.id)} style={{ padding: "6px 10px", borderRadius: 10, backgroundColor: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.08)", color: "rgba(255,255,255,0.3)", cursor: "pointer", display: "flex", alignItems: "center", gap: 4, fontSize: 11 }}>
-        <Trash2 size={13} /> 삭제
-      </button>
-    </div>
-    <div style={{ padding: "14px 20px", borderBottom: "1px solid rgba(255,255,255,0.06)", display: "flex", alignItems: "center", gap: 8 }}>
-      <Calendar size={14} style={{ color: "rgba(255,255,255,0.3)" }} />
-      <span style={{ fontSize: 13, color: "rgba(255,255,255,0.5)" }}>{trip.started_at} ~ {trip.ended_at}</span>
-      <span style={{ marginLeft: "auto", fontSize: 11, color: "rgba(255,255,255,0.25)" }}>총 {visits.length}일</span>
-    </div>
-    <div style={{ flex: 1, overflowY: "auto", padding: 16 }}>
-      {visits.length === 0 ? (
-        <p style={{ textAlign: "center", fontSize: 12, color: "rgba(255,255,255,0.2)", padding: "40px 0", fontStyle: "italic" }}>기록이 없어요</p>
-      ) : (
-        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-          {visits.map((visit, idx) => (
-            <div key={visit.id} style={{ backgroundColor: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)", borderRadius: 16, overflow: "hidden" }}>
-              <div style={{ padding: "12px 16px", borderBottom: "1px solid rgba(255,255,255,0.05)", display: "flex", alignItems: "center", gap: 10 }}>
-                <div style={{ width: 24, height: 24, borderRadius: "50%", backgroundColor: "rgba(255,107,107,0.15)", border: "1px solid rgba(255,107,107,0.3)", display: "flex", alignItems: "center", justifyContent: "center" }}>
-                  <span style={{ fontSize: 10, color: "#FF6B6B", fontWeight: 600 }}>Day {idx + 1}</span>
-                </div>
-                <span style={{ fontSize: 13, color: "rgba(255,255,255,0.6)" }}>{visit.date}</span>
-                <span style={{ marginLeft: "auto", fontSize: 11, color: "rgba(255,107,107,0.6)" }}>📍 {visit.regionName}</span>
-              </div>
-              {/* 사진 갤러리 */}
-              {photoUrlsMap && photoUrlsMap[visit.id] && photoUrlsMap[visit.id].length > 0 && (
-                <div style={{ padding: "0 16px 12px" }}>
-                  <PhotoGallery photoUrls={photoUrlsMap[visit.id]} />
-                </div>
-              )}
-              <div style={{ padding: "12px 16px", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-                <span style={{ fontSize: 12, color: "rgba(255,255,255,0.3)" }}>
-                  {visit.points.length > 0 ? `${visit.points.length}곳 방문` : "위치 정보 없음"}
-                </span>
-                <div style={{ display: "flex", gap: 8 }}>
-                  <button onClick={() => onDeleteVisit(visit.id)} style={{ padding: "6px 10px", borderRadius: 8, backgroundColor: "transparent", border: "1px solid rgba(255,255,255,0.08)", color: "rgba(255,255,255,0.25)", cursor: "pointer", display: "flex", alignItems: "center" }}>
-                    <Trash2 size={12} />
-                  </button>
-                  <button onClick={() => onViewDetail(visit)} style={{ padding: "6px 14px", borderRadius: 8, backgroundColor: "rgba(255,107,107,0.1)", border: "1px solid rgba(255,107,107,0.2)", color: "#FF6B6B", cursor: "pointer", fontSize: 12, display: "flex", alignItems: "center", gap: 4 }}>
-                    동선 보기 <ChevronRight size={13} />
-                  </button>
-                </div>
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  </div>
-);
 
 // ── 메인 앱 ──
 const SpotLog = ({ user, couple, onLogout }) => {
@@ -603,7 +845,6 @@ const SpotLog = ({ user, couple, onLogout }) => {
   const [uploadStep, setUploadStep] = useState(0);
   const [previewFile, setPreviewFile] = useState(null);
   const [pendingGroups, setPendingGroups] = useState([]);
-  const [allUploadedFiles, setAllUploadedFiles] = useState([]); // Storage 업로드용 원본 파일
   const [tripTitle, setTripTitle] = useState("");
   const [viewDetail, setViewDetail] = useState(null);
   const [viewTrip, setViewTrip] = useState(null);
@@ -611,7 +852,6 @@ const SpotLog = ({ user, couple, onLogout }) => {
   const [trips, setTrips] = useState([]);
   const [visits, setVisits] = useState([]);
   const [dbLoading, setDbLoading] = useState(true);
-  const [photoUrlsMap, setPhotoUrlsMap] = useState({}); // visitId → URL[]
 
   const fetchAll = async () => {
     const [{ data: tripsData }, { data: visitsData }] = await Promise.all([
@@ -620,10 +860,6 @@ const SpotLog = ({ user, couple, onLogout }) => {
     ]);
     setTrips(tripsData || []);
     setVisits((visitsData || []).map((r) => ({ id: r.id, tripId: r.trip_id, regionName: r.region_name, date: r.date, points: r.points })));
-    // photoUrlsMap 구성
-    const urlMap = {};
-    (visitsData || []).forEach((r) => { if (r.photo_urls && r.photo_urls.length > 0) urlMap[r.id] = r.photo_urls; });
-    setPhotoUrlsMap(urlMap);
     setDbLoading(false);
   };
 
@@ -638,104 +874,37 @@ const SpotLog = ({ user, couple, onLogout }) => {
   }, [couple.id]);
 
   const getGeoKey = (geo) => buildKeyFromCode(geo.properties.name, geo.properties.code);
-  const visitedNames = [...new Set(visits.map((v) => v.regionName))];
+  const visitedNames = visits.map((v) => v.regionName.replace(/\s+/g, ""));
   const getVisitsForTrip = (tripId) => visits.filter((v) => v.tripId === tripId);
   const years = ["전체", ...new Set(trips.map((t) => t.started_at.split(".")[0]))].reverse();
   const filteredTrips = filterYear === "전체" ? trips : trips.filter((t) => t.started_at.startsWith(filterYear));
-
-  // ✅ 버그 3 수정: 여행 보기 — tripId 기준으로 찾고, 없으면 regionName으로 fallback
-  const handleViewTrip = (regionName) => {
-    // 해당 지역의 visit 중 tripId가 있는 것 먼저 찾기
-    const relatedVisit = visits.find((v) => v.regionName === regionName && v.tripId);
-    if (relatedVisit) {
-      const trip = trips.find((t) => t.id === relatedVisit.tripId);
-      if (trip) { setViewTrip(trip); return; }
-    }
-    // tripId로 못 찾으면 regionName이 포함된 trip 검색
-    for (const trip of trips) {
-      const tripVisits = getVisitsForTrip(trip.id);
-      if (tripVisits.some((v) => v.regionName === regionName)) {
-        setViewTrip(trip);
-        return;
-      }
-    }
-  };
-
-  // ... 기존 코드 상단 ...
 
   const handleFileUpload = async (e) => {
     const files = Array.from(e.target.files);
     if (!files.length) return;
     setPreviewFile(URL.createObjectURL(files[0]));
-    setAllUploadedFiles(files);
     setUploadStep(1);
-
     try {
-      const points = await extractPointsFromFiles(files);
+      const points = await extractPointsFromFiles(files, couple.id);
+
       if (points.length === 0) { setUploadStep(4); return; }
+
       const groups = groupPointsByDate(points);
-
-      // 초기 그룹 설정 (weather 필드 추가)
-      const initialGroups = groups.map((g) => ({
-        ...g,
-        regionName: null,
-        weather: null,
-        files: files.filter((f) => {  // 해당 날짜 파일만 매핑
-          if (!f) return false;
-          try {
-            const t = g.points.map(p => p.fileName);
-            return t.includes(f.name);
-          } catch { return false; }
-        }),
-        analyzing: true
-      }));
-      setPendingGroups(initialGroups);
+      setPendingGroups(groups.map((g) => ({ ...g, regionName: null, dominantPoints: null, totalPoints: g.points.length, analyzing: true })));
       setUploadStep(2);
-
       const kakaoReady = await waitForKakao(3000);
       if (kakaoReady) {
         for (let i = 0; i < groups.length; i++) {
-          // 1. 지역명 분석
           const { regionName, points: dominantPoints } = await getDominantRegionAndPoints(groups[i].points);
-
-          let weatherInfo = null;
-          if (regionName) {
-            try {
-              // 2. 파이썬 서버로 날씨 크롤링 요청
-              const response = await fetch("http://localhost:8000/get-weather", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                  date: groups[i].dateKey, // "2026-04-14"
-                  location: regionName.split(" ")[0] // "서울" 등 앞글자만 전송
-                }),
-              });
-              const weatherData = await response.json();
-              if (weatherData.status === "success") {
-                weatherInfo = `${weatherData.weather} (${weatherData.temperature})`;
-              }
-            } catch (err) {
-              console.error("날씨 정보 호출 실패:", err);
-            }
-          }
-
-          // 3. 상태 업데이트 (지역명 + 날씨)
-          setPendingGroups((prev) =>
-            prev.map((g, idx) =>
-              idx === i ? { ...g, regionName: regionName || null, weather: weatherInfo, dominantPoints, analyzing: false } : g
-            )
-          );
+          setPendingGroups((prev) => prev.map((g, idx) => idx === i ? { ...g, regionName: regionName || null, dominantPoints, analyzing: false } : g));
         }
       } else {
         setPendingGroups((prev) => prev.map((g) => ({ ...g, regionName: null, dominantPoints: g.points, analyzing: false })));
       }
     } catch (err) {
-      console.error("EXIF 처리 오류:", err);
       setUploadStep(4);
     }
   };
-
-  // ... 기존 코드 하단 ...
 
   const handleSave = async () => {
     const title = tripTitle.trim() || "우리의 여행";
@@ -743,52 +912,56 @@ const SpotLog = ({ user, couple, onLogout }) => {
     const startedAt = dates[0] || formatDate(new Date());
     const endedAt = dates[dates.length - 1] || startedAt;
 
-    const { data: tripData, error: tripError } = await supabase.from("trips").insert({
-      couple_id: couple.id,
-      title,
-      started_at: startedAt,
-      ended_at: endedAt
-    }).select().single();
-
+    // 1. 여행(trips) 생성
+    const { data: tripData, error: tripError } = await supabase
+      .from("trips").insert({ couple_id: couple.id, title, started_at: startedAt, ended_at: endedAt })
+      .select().single();
     if (tripError) { alert("저장에 실패했어요."); return; }
 
-    // ✅ 이 부분이 핵심입니다! rows를 만들 때 weather_info를 추가하세요.
-    // 날짜별로 사진을 Storage에 업로드
-    const groupsWithPhotos = await Promise.all(
-      pendingGroups.map(async (group) => {
-        const dateKey = group.date ? getDateKey(group.date) : "unknown";
-        // 해당 날짜 포인트의 파일명 목록
-        const dateFileNames = new Set((group.dominantPoints || group.points).map(p => p.fileName).filter(Boolean));
-        const dateFiles = allUploadedFiles.filter(f => dateFileNames.has(f.name));
-        let photoUrls = [];
-        if (dateFiles.length > 0) {
-          photoUrls = await uploadPhotosToStorage(dateFiles, couple.id, dateKey);
+    // 2. 날짜별로 그룹화하여 데이터 정리 (같은 날짜면 합침)
+    const dailyMap = {};
+    for (const group of pendingGroups) {
+      const dateKey = group.date ? formatDate(group.date) : formatDate(new Date());
+      if (!dailyMap[dateKey]) {
+        dailyMap[dateKey] = {
+          couple_id: couple.id,
+          trip_id: tripData.id,
+          region_name: group.regionName || selectedRegion || "알 수 없는 지역",
+          date: dateKey,
+          points: [],
+        };
+      }
+      // 해당 날짜의 포인트들 합치기
+      const newPoints = (group.dominantPoints || group.points).map(p => ({
+        ...p,
+        regionName: group.regionName // 포인트마다 방문 지역 기록
+      }));
+      dailyMap[dateKey].points = [...dailyMap[dateKey].points, ...newPoints];
+      
+      // 지역명이 여러 개일 경우 콤마로 연결하거나 대표 지역 설정
+      if (group.regionName && !dailyMap[dateKey].region_name.includes(group.regionName)) {
+        if (dailyMap[dateKey].region_name === "알 수 없는 지역" || dailyMap[dateKey].region_name === selectedRegion) {
+          dailyMap[dateKey].region_name = group.regionName;
+        } else {
+          dailyMap[dateKey].region_name += `, ${group.regionName}`;
         }
-        return { ...group, photoUrls };
-      })
-    );
+      }
+    }
 
-    const rows = groupsWithPhotos.map((group) => ({
-      couple_id: couple.id,
-      trip_id: tripData.id,
-      region_name: group.regionName || selectedRegion || "알 수 없는 지역",
-      date: group.date ? formatDate(group.date) : formatDate(new Date()),
-      points: group.dominantPoints || group.points,
-      weather_info: group.weather,
-      photo_urls: group.photoUrls,
-    }));
+    const rows = Object.values(dailyMap);
 
-    const { error: visitsError } = await supabase.from("visits").insert(rows);
-    if (visitsError) { alert("저장에 실패했어요."); return; }
-
+    // 3. 합쳐진 데이터를 한 번에 저장
+    const { error } = await supabase.from("visits").insert(rows);
+    if (error) { alert("저장에 실패했어요."); return; }
     closeModal();
   };
 
   const handleSaveWithSelectedRegion = async () => {
     if (!selectedRegion) return;
-    const title = tripTitle.trim() || selectedRegion;
     const today = formatDate(new Date());
-    const { data: tripData, error } = await supabase.from("trips").insert({ couple_id: couple.id, title, started_at: today, ended_at: today }).select().single();
+    const { data: tripData, error } = await supabase
+      .from("trips").insert({ couple_id: couple.id, title: tripTitle.trim() || selectedRegion, started_at: today, ended_at: today })
+      .select().single();
     if (error) { alert("저장에 실패했어요."); return; }
     await supabase.from("visits").insert([{ couple_id: couple.id, trip_id: tripData.id, region_name: selectedRegion, date: today, points: [] }]);
     closeModal();
@@ -805,13 +978,24 @@ const SpotLog = ({ user, couple, onLogout }) => {
     await supabase.from("visits").delete().eq("id", visitId);
   };
 
+  const handleUpdateVisit = async (visitId, updatedPoints) => {
+    // 로컬 상태 즉시 업데이트 (Optimistic UI)
+    setVisits(prev => prev.map(v => v.id === visitId ? { ...v, points: updatedPoints } : v));
+    if (viewDetail && viewDetail.id === visitId) {
+      setViewDetail(prev => ({ ...prev, points: updatedPoints }));
+    }
+
+    // Supabase DB 업데이트
+    const { error } = await supabase.from("visits").update({ points: updatedPoints }).eq("id", visitId);
+    if (error) {
+      console.error("Memo update failed:", error);
+      alert("메모 저장에 실패했습니다.");
+    }
+  };
+
   const closeModal = () => {
-    setModalOpen(false);
-    setUploadStep(0);
-    setPreviewFile(null);
-    setPendingGroups([]);
-    setAllUploadedFiles([]);
-    setTripTitle("");
+    setModalOpen(false); setUploadStep(0);
+    setPreviewFile(null); setPendingGroups([]); setTripTitle("");
   };
 
   const isAnalyzing = pendingGroups.some((g) => g.analyzing);
@@ -819,30 +1003,20 @@ const SpotLog = ({ user, couple, onLogout }) => {
 
   return (
     <div className="w-full max-w-screen-xl mx-auto h-screen flex flex-col overflow-hidden relative" style={{ backgroundColor: "#0A0A0F", colorScheme: "dark" }}>
-      {viewDetail && (
-        <KakaoDetailMap
-          data={viewDetail}
-          onBack={() => setViewDetail(null)}
-          photoUrls={photoUrlsMap[viewDetail.id] || []}
-        />
-      )}
+      {viewDetail && <KakaoDetailMap data={viewDetail} onBack={() => setViewDetail(null)} onUpdateVisit={handleUpdateVisit} />}
       {viewTrip && !viewDetail && (
         <TripDetailView trip={viewTrip} visits={currentTripVisits} onBack={() => setViewTrip(null)}
-          onViewDetail={(v) => setViewDetail(v)} onDeleteVisit={deleteVisit} onDeleteTrip={deleteTrip} photoUrlsMap={photoUrlsMap} />
+          onViewDetail={(v) => setViewDetail(v)} onDeleteVisit={deleteVisit} onDeleteTrip={deleteTrip} />
       )}
       <div className="fixed top-0 left-1/2 -translate-x-1/2 pointer-events-none z-0" style={{ width: 600, height: 240, background: "radial-gradient(ellipse, rgba(255,107,107,0.07) 0%, transparent 70%)", filter: "blur(40px)" }} />
 
       <header className="fixed top-0 left-1/2 -translate-x-1/2 w-full max-w-screen-xl z-50 flex items-center justify-between px-5 py-4" style={{ background: "linear-gradient(to bottom, #0A0A0F 60%, transparent)" }}>
-        <button onClick={() => setDrawerOpen(true)} className="w-9 h-9 flex items-center justify-center rounded-xl" style={{ backgroundColor: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.1)", color: "white", cursor: "pointer" }}>
-          <Menu size={18} />
-        </button>
+        <button onClick={() => setDrawerOpen(true)} className="w-9 h-9 flex items-center justify-center rounded-xl" style={{ backgroundColor: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.1)", color: "white", cursor: "pointer" }}><Menu size={18} /></button>
         <div className="flex items-center gap-2">
           <Heart size={14} fill="#FF6B6B" color="#FF6B6B" />
           <span style={{ fontSize: 15, fontWeight: 500, letterSpacing: "0.14em", color: "#FF6B6B", textTransform: "uppercase" }}>SpotLog</span>
         </div>
-        <button onClick={() => setModalOpen(true)} className="w-9 h-9 flex items-center justify-center rounded-xl" style={{ backgroundColor: "#FF6B6B", color: "white", border: "none", cursor: "pointer", boxShadow: "0 4px 16px rgba(255,107,107,0.3)" }}>
-          <Plus size={18} />
-        </button>
+        <button onClick={() => setModalOpen(true)} className="w-9 h-9 flex items-center justify-center rounded-xl" style={{ backgroundColor: "#FF6B6B", color: "white", border: "none", cursor: "pointer", boxShadow: "0 4px 16px rgba(255,107,107,0.3)" }}><Plus size={18} /></button>
       </header>
 
       <main className="flex-1 pt-[72px] pb-4 px-4 flex flex-col gap-3 relative z-10 overflow-hidden">
@@ -874,7 +1048,7 @@ const SpotLog = ({ user, couple, onLogout }) => {
                   {({ geographies }) =>
                     geographies.map((geo) => {
                       const key = getGeoKey(geo);
-                      const visited = visitedNames.includes(key);
+                      const visited = visitedNames.includes(key.replace(/\s+/g, ""));
                       const selected = selectedRegion === key;
                       return (
                         <Geography key={geo.rsmKey} geography={geo} onClick={() => setSelectedRegion(key)}
@@ -899,18 +1073,19 @@ const SpotLog = ({ user, couple, onLogout }) => {
               <MapPin size={16} style={{ color: "#FF6B6B", flexShrink: 0 }} />
               <div className="flex-1" style={{ minWidth: 0 }}>
                 <p style={{ fontSize: 10, color: "rgba(255,107,107,0.6)", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 2 }}>
-                  {visitedNames.includes(selectedRegion) ? "Visited ✓" : "Selected Region"}
+                  {visitedNames.includes(selectedRegion.replace(/\s+/g, "")) ? "Visited ✓" : "Selected Region"}
                 </p>
                 <p style={{ fontSize: 15, fontWeight: 500, color: "white", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{selectedRegion}</p>
               </div>
-              {visitedNames.includes(selectedRegion) ? (
-                <button onClick={() => handleViewTrip(selectedRegion)} className="rounded-xl"
-                  style={{ padding: "8px 16px", fontSize: 12, fontWeight: 500, color: "rgba(255,255,255,0.6)", backgroundColor: "rgba(255,255,255,0.08)", border: "1px solid rgba(255,255,255,0.1)", flexShrink: 0, cursor: "pointer" }}>
+              {visitedNames.includes(selectedRegion.replace(/\s+/g, "")) ? (
+                <button onClick={() => {
+                  const rv = visits.find((v) => v.regionName.replace(/\s+/g, "") === selectedRegion.replace(/\s+/g, ""));
+                  if (rv?.tripId) { const t = trips.find((t) => t.id === rv.tripId); if (t) setViewTrip(t); }
+                }} className="rounded-xl" style={{ padding: "8px 16px", fontSize: 12, fontWeight: 500, color: "rgba(255,255,255,0.6)", backgroundColor: "rgba(255,255,255,0.08)", border: "1px solid rgba(255,255,255,0.1)", flexShrink: 0, cursor: "pointer" }}>
                   여행 보기
                 </button>
               ) : (
-                <button onClick={() => setModalOpen(true)} className="rounded-xl"
-                  style={{ padding: "8px 16px", fontSize: 12, fontWeight: 500, color: "white", backgroundColor: "#FF6B6B", border: "none", flexShrink: 0, cursor: "pointer" }}>
+                <button onClick={() => setModalOpen(true)} className="rounded-xl" style={{ padding: "8px 16px", fontSize: 12, fontWeight: 500, color: "white", backgroundColor: "#FF6B6B", border: "none", flexShrink: 0, cursor: "pointer" }}>
                   기록하기
                 </button>
               )}
@@ -923,7 +1098,6 @@ const SpotLog = ({ user, couple, onLogout }) => {
         </div>
       </main>
 
-      {/* DRAWER */}
       {drawerOpen && (
         <div className="fixed inset-0 z-[1000] flex">
           <div className="absolute inset-0 backdrop-blur-sm" style={{ backgroundColor: "rgba(0,0,0,0.5)" }} onClick={() => setDrawerOpen(false)} />
@@ -932,9 +1106,9 @@ const SpotLog = ({ user, couple, onLogout }) => {
               <span style={{ fontSize: 14, fontWeight: 500, color: "#FF6B6B" }}>History</span>
               <button onClick={() => setDrawerOpen(false)} style={{ color: "rgba(255,255,255,0.4)", background: "none", border: "none", cursor: "pointer" }}><X size={18} /></button>
             </div>
-            <div style={{ padding: "12px 20px", borderBottom: "1px solid rgba(255,255,255,0.05)", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+            <div style={{ padding: "12px 20px", borderBottom: "1px solid rgba(255,255,255,0.05)", display: "flex", alignItems: "center", justifyItems: "space-between" }}>
               <p style={{ fontSize: 11, color: "rgba(255,255,255,0.3)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 160 }}>{user?.email}</p>
-              <button onClick={onLogout} style={{ display: "flex", alignItems: "center", gap: 4, padding: "4px 8px", borderRadius: 8, backgroundColor: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.08)", color: "rgba(255,255,255,0.4)", fontSize: 11, cursor: "pointer" }}>
+              <button onClick={onLogout} style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 4, padding: "4px 8px", borderRadius: 8, backgroundColor: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.08)", color: "rgba(255,255,255,0.4)", fontSize: 11, cursor: "pointer" }}>
                 <LogOut size={12} /> 로그아웃
               </button>
             </div>
@@ -948,7 +1122,7 @@ const SpotLog = ({ user, couple, onLogout }) => {
             </div>
             <div className="flex-1 overflow-y-auto px-4 py-4" style={{ display: "flex", flexDirection: "column", gap: 8 }}>
               {filteredTrips.map((trip) => {
-                const tripVisits = getVisitsForTrip(trip.id);
+                const tv = getVisitsForTrip(trip.id);
                 return (
                   <div key={trip.id} onClick={() => { setViewTrip(trip); setDrawerOpen(false); }} className="rounded-xl cursor-pointer"
                     style={{ padding: 14, backgroundColor: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.05)", transition: "border-color 0.2s" }}
@@ -963,11 +1137,11 @@ const SpotLog = ({ user, couple, onLogout }) => {
                       {trip.started_at === trip.ended_at ? trip.started_at : `${trip.started_at} ~ ${trip.ended_at}`}
                     </p>
                     <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
-                      {[...new Set(tripVisits.map((v) => v.regionName))].slice(0, 3).map((r) => (
+                      {[...new Set(tv.map((v) => v.regionName))].slice(0, 3).map((r) => (
                         <span key={r} style={{ fontSize: 10, color: "rgba(255,107,107,0.7)", backgroundColor: "rgba(255,107,107,0.08)", border: "1px solid rgba(255,107,107,0.15)", borderRadius: 6, padding: "2px 8px" }}>{r}</span>
                       ))}
-                      {new Set(tripVisits.map((v) => v.regionName)).size > 3 && (
-                        <span style={{ fontSize: 10, color: "rgba(255,255,255,0.25)", padding: "2px 4px" }}>+{new Set(tripVisits.map((v) => v.regionName)).size - 3}</span>
+                      {new Set(tv.map((v) => v.regionName)).size > 3 && (
+                        <span style={{ fontSize: 10, color: "rgba(255,255,255,0.25)", padding: "2px 4px" }}>+{new Set(tv.map((v) => v.regionName)).size - 3}</span>
                       )}
                     </div>
                   </div>
@@ -979,7 +1153,6 @@ const SpotLog = ({ user, couple, onLogout }) => {
         </div>
       )}
 
-      {/* UPLOAD MODAL */}
       {modalOpen && (
         <div className="fixed inset-0 z-[2000] flex items-end justify-center">
           <div className="absolute inset-0 backdrop-blur-sm" style={{ backgroundColor: "rgba(0,0,0,0.7)" }} onClick={closeModal} />
@@ -1009,8 +1182,8 @@ const SpotLog = ({ user, couple, onLogout }) => {
               <div className="flex flex-col items-center gap-4" style={{ padding: "48px 0" }}>
                 <Loader2 className="animate-spin" size={32} style={{ color: "#FF6B6B" }} />
                 <div style={{ textAlign: "center" }}>
-                  <p style={{ fontSize: 14, fontWeight: 500, color: "white", marginBottom: 4 }}>위치 데이터 분석 중</p>
-                  <p style={{ fontSize: 12, color: "rgba(255,255,255,0.35)" }}>EXIF GPS 정보를 읽고 있어요...</p>
+                  <p style={{ fontSize: 14, fontWeight: 500, color: "white", marginBottom: 4 }}>위치 데이터 분석 및 이미지 압축 중</p>
+                  <p style={{ fontSize: 12, color: "rgba(255,255,255,0.35)" }}>사진을 안전하게 클라우드에 저장하고 있어요...</p>
                 </div>
               </div>
             )}
@@ -1018,37 +1191,36 @@ const SpotLog = ({ user, couple, onLogout }) => {
             {uploadStep === 2 && (
               <>
                 <h3 style={{ fontSize: 16, fontWeight: 500, color: "white", marginBottom: 6 }}>여행 이름 짓기</h3>
-                <p style={{ fontSize: 12, color: "rgba(255,255,255,0.35)", marginBottom: 20 }}>{pendingGroups.length}일치 사진이 감지됐어요!</p>
+                <p style={{ fontSize: 12, color: "rgba(255,255,255,0.35)", marginBottom: 20 }}>{pendingGroups.length}일치 사진이 감지됐어요</p>
                 <div style={{ position: "relative", marginBottom: 16 }}>
                   <Pencil size={15} style={{ position: "absolute", left: 14, top: "50%", transform: "translateY(-50%)", color: "rgba(255,255,255,0.3)" }} />
-                  <input type="text" placeholder="예: 경주 벚꽃 여행 🌸" value={tripTitle} onChange={(e) => setTripTitle(e.target.value)} maxLength={30}
+                  <input type="text" placeholder="예: 잠실 벚꽃 여행 🌸" value={tripTitle} onChange={(e) => setTripTitle(e.target.value)} maxLength={30} autoFocus
                     style={{ width: "100%", padding: "12px 16px 12px 40px", borderRadius: 12, backgroundColor: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.1)", color: "white", fontSize: 14, outline: "none", boxSizing: "border-box" }}
                     onFocus={(e) => (e.target.style.borderColor = "rgba(255,107,107,0.4)")}
                     onBlur={(e) => (e.target.style.borderColor = "rgba(255,255,255,0.1)")}
-                    autoFocus />
+                  />
                 </div>
                 <div style={{ padding: "12px 14px", backgroundColor: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.06)", borderRadius: 12, marginBottom: 20 }}>
                   <p style={{ fontSize: 11, color: "rgba(255,255,255,0.3)", marginBottom: 8 }}>감지된 일정</p>
-                  <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                    {pendingGroups.map((g, idx) => (
-                      <div key={idx} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12 }}>
-                        <span style={{ color: "rgba(255,107,107,0.6)", minWidth: 40 }}>Day {idx + 1}</span>
-                        <span style={{ color: "rgba(255,255,255,0.4)" }}>{g.date ? formatDate(g.date) : "날짜 미상"}</span>
-                        {g.analyzing
-                          ? <Loader2 size={10} className="animate-spin" style={{ color: "rgba(255,255,255,0.2)", marginLeft: "auto" }} />
-                          : <span style={{ color: "rgba(255,107,107,0.5)", marginLeft: "auto" }}>{g.regionName || "분석 중"}</span>
-                        }
-                      </div>
-                    ))}
-                  </div>
+                  {pendingGroups.map((g, idx) => (
+                    <div key={idx} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, marginBottom: 6 }}>
+                      <span style={{ color: "rgba(255,107,107,0.6)", minWidth: 40 }}>Day {idx + 1}</span>
+                      <span style={{ color: "rgba(255,255,255,0.4)" }}>{g.date ? formatDate(g.date) : "날짜 미상"}</span>
+                      {g.analyzing ? (
+                        <Loader2 size={10} className="animate-spin" style={{ color: "rgba(255,255,255,0.2)", marginLeft: "auto" }} />
+                      ) : (
+                        <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 6 }}>
+                          {g.regionName && <WeatherBadge date={formatDate(g.date)} location={g.regionName} />}
+                          <span style={{ color: "rgba(255,107,107,0.5)" }}>{g.regionName || "지역 분석 실패"}</span>
+                        </div>
+                      )}
+                    </div>
+                  ))}
                 </div>
-                <button onClick={() => setUploadStep(3)} style={{ width: "100%", padding: 14, backgroundColor: "#FF6B6B", color: "white", fontSize: 14, fontWeight: 500, border: "none", borderRadius: 12, cursor: "pointer" }}>
-                  다음
-                </button>
+                <button onClick={() => setUploadStep(3)} style={{ width: "100%", padding: 14, backgroundColor: "#FF6B6B", color: "white", fontSize: 14, fontWeight: 500, border: "none", borderRadius: 12, cursor: "pointer" }}>다음</button>
               </>
             )}
 
-            {/* STEP 3: 최종 확인 및 날씨 표시 */}
             {uploadStep === 3 && (
               <>
                 <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 16 }}>
@@ -1057,13 +1229,17 @@ const SpotLog = ({ user, couple, onLogout }) => {
                   {isAnalyzing && (
                     <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 6 }}>
                       <Loader2 size={13} className="animate-spin" style={{ color: "#FF6B6B" }} />
-                      <span style={{ fontSize: 11, color: "rgba(255,255,255,0.4)" }}>분석 중</span>
+                      <span style={{ fontSize: 11, color: "rgba(255,255,255,0.4)" }}>지역 분석 중</span>
                     </div>
                   )}
                 </div>
                 <div style={{ padding: "14px 16px", backgroundColor: "rgba(255,107,107,0.08)", border: "1px solid rgba(255,107,107,0.2)", borderRadius: 14, marginBottom: 12 }}>
                   <p style={{ fontSize: 11, color: "rgba(255,107,107,0.5)", marginBottom: 4 }}>여행 이름</p>
                   <p style={{ fontSize: 16, fontWeight: 500, color: "#FF6B6B" }}>{tripTitle.trim() || "우리의 여행"}</p>
+                  <p style={{ fontSize: 11, color: "rgba(255,255,255,0.3)", marginTop: 4 }}>
+                    {pendingGroups.filter((g) => g.date).map((g) => formatDate(g.date)).sort()[0]} ~{" "}
+                    {pendingGroups.filter((g) => g.date).map((g) => formatDate(g.date)).sort().slice(-1)[0]}
+                  </p>
                 </div>
                 <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 16, maxHeight: 200, overflowY: "auto" }}>
                   {pendingGroups.map((group, idx) => (
@@ -1071,18 +1247,13 @@ const SpotLog = ({ user, couple, onLogout }) => {
                       <div style={{ width: 22, height: 22, borderRadius: "50%", backgroundColor: "#FF6B6B", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
                         <span style={{ fontSize: 10, color: "white", fontWeight: 600 }}>{idx + 1}</span>
                       </div>
-                      <span style={{ flex: 1, fontSize: 12, color: "rgba(255,255,255,0.5)" }}>{group.date ? formatDate(group.date) : "날짜 미상"}</span>
-                      {group.analyzing ? (
-                        <Loader2 size={11} className="animate-spin" style={{ color: "rgba(255,255,255,0.3)" }} />
-                      ) : (
-                        <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end" }}>
-                          <span style={{ fontSize: 12, color: "#FF6B6B" }}>{group.regionName || "지역 미상"}</span>
-                          {/* 파이썬 크롤링 서버에서 가져온 날씨 표시 */}
-                          {group.weather && (
-                            <span style={{ fontSize: 10, color: "rgba(255,255,255,0.4)", marginTop: 2 }}>{group.weather}</span>
-                          )}
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <p style={{ fontSize: 12, color: "rgba(255,255,255,0.5)", marginBottom: 2 }}>{group.date ? formatDate(group.date) : "날짜 미상"}</p>
+                        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                          <span style={{ fontSize: 12, color: "#FF6B6B", fontWeight: 500 }}>{group.regionName || "지역 미상"}</span>
+                          {!group.analyzing && group.regionName && <WeatherBadge date={formatDate(group.date)} location={group.regionName} />}
                         </div>
-                      )}
+                      </div>
                     </div>
                   ))}
                 </div>
@@ -1129,11 +1300,10 @@ const SpotLog = ({ user, couple, onLogout }) => {
         </div>
       )}
 
-      <style>{`
-        * { box-sizing: border-box; }
-        ::-webkit-scrollbar { width: 0; }
-        input::placeholder { color: rgba(255,255,255,0.25); }
-      `}</style>
+      {/* AI 챗봇 컴포넌트 (우측 하단 플로팅 버튼) */}
+      <ChatBot />
+
+      <style>{`* { box-sizing: border-box; } ::-webkit-scrollbar { width: 0; } input::placeholder { color: rgba(255,255,255,0.25); }`}</style>
     </div>
   );
 };
